@@ -4,6 +4,7 @@ import {
   FLOATING_BUTTON_SIZE,
   FLOATING_MARGIN,
   clampFloatingPosition,
+  computePrimaryMenuPositions,
   computeRadialPositions,
   hasExceededDragThreshold,
   restoreFloatingPosition,
@@ -75,6 +76,24 @@ describe("AssistiveTouch floating geometry", () => {
         expect(button.top + FLOATING_BUTTON_SIZE).toBeLessThanOrEqual(viewport.height - FLOATING_MARGIN);
       });
     }
+  });
+
+  it("places a seventh one-tap action on a separate outer ring", () => {
+    const main = { x: viewport.width - FLOATING_BALL_SIZE - FLOATING_MARGIN, y: 320 };
+    const positions = computePrimaryMenuPositions(main, "right", 7, viewport);
+    expect(positions).toHaveLength(7);
+    const mainCenterX = main.x + FLOATING_BALL_SIZE / 2;
+    const distance = (position: { left: number; top: number }) => Math.hypot(
+      position.left + FLOATING_BUTTON_SIZE / 2 - mainCenterX,
+      position.top + FLOATING_BUTTON_SIZE / 2 - (main.y + FLOATING_BALL_SIZE / 2),
+    );
+    expect(distance(positions[6])).toBeGreaterThan(distance(positions[0]) + 40);
+    positions.forEach((button) => {
+      expect(button.left).toBeGreaterThanOrEqual(FLOATING_MARGIN);
+      expect(button.top).toBeGreaterThanOrEqual(FLOATING_MARGIN);
+      expect(button.left + FLOATING_BUTTON_SIZE).toBeLessThanOrEqual(viewport.width - FLOATING_MARGIN);
+      expect(button.top + FLOATING_BUTTON_SIZE).toBeLessThanOrEqual(viewport.height - FLOATING_MARGIN);
+    });
   });
 
   it("selects the eligible answer with the largest visible area", () => {

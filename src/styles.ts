@@ -83,6 +83,9 @@ export const widgetStyles = `
     transform: scale(1.08);
   }
   .paintgpt-orbit-button.is-done { color: white; background: #202123; }
+  .paintgpt-orbit-button.is-clear { color: #dc2626; background: rgba(254, 242, 242, .96); }
+  .paintgpt-orbit-button.is-clear:hover,
+  .paintgpt-orbit-button.is-clear:focus-visible { color: white; background: #dc2626; }
   .paintgpt-orbit-button:disabled { opacity: .36; cursor: default; transform: none; }
   .paintgpt-orbit-button svg { width: 20px; height: 20px; pointer-events: none; }
 
@@ -147,6 +150,9 @@ export const widgetStyles = `
     .paintgpt-secondary-button { background: rgba(49, 51, 56, .95); }
     .paintgpt-orbit-button.is-active { background: #243b5a; color: #9ec5ff; }
     .paintgpt-orbit-button.is-done { background: #f3f4f6; color: #202123; }
+    .paintgpt-orbit-button.is-clear { background: rgba(69, 10, 10, .94); color: #fca5a5; }
+    .paintgpt-orbit-button.is-clear:hover,
+    .paintgpt-orbit-button.is-clear:focus-visible { background: #b91c1c; color: white; }
   }
 
   @media (prefers-reduced-motion: reduce) {

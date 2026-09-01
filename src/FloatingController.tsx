@@ -11,6 +11,7 @@ import {
 import {
   FLOATING_DRAG_THRESHOLD,
   clampFloatingPosition,
+  computePrimaryMenuPositions,
   computeRadialPositions,
   hasExceededDragThreshold,
   restoreFloatingPosition,
@@ -249,8 +250,19 @@ export function FloatingController({ targets }: FloatingControllerProps) {
       { id: "undo", label: "撤销", icon: icons.undo, disabled: !activeTarget?.state.canUndo, action: () => activeTarget?.controller?.undo() },
       { id: "redo", label: "重做", icon: icons.redo, disabled: !activeTarget?.state.canRedo, action: () => activeTarget?.controller?.redo() },
       { id: "done", label: "完成批注", icon: icons.done, action: finish },
+      {
+        id: "clear",
+        label: "一键清空全部笔迹（可撤销）",
+        icon: icons.trash,
+        disabled: !activeTarget || activeTarget.state.strokeCount === 0,
+        action: () => {
+          activeTarget?.controller?.clear();
+          setSecondaryTool(null);
+          showToast("笔迹已清空，可点击撤销恢复");
+        },
+      },
     ],
-    [activeTarget, currentTool, finish],
+    [activeTarget, currentTool, finish, showToast],
   );
 
   const secondaryItems = useMemo<MenuItem[]>(() => {
@@ -303,7 +315,7 @@ export function FloatingController({ targets }: FloatingControllerProps) {
     ];
   }, [activeTarget, secondaryTool]);
 
-  const primaryPositions = computeRadialPositions(position, side, primaryItems.length, viewport);
+  const primaryPositions = computePrimaryMenuPositions(position, side, primaryItems.length, viewport);
   const secondaryPositions = computeRadialPositions(position, side, secondaryItems.length, viewport, 154);
 
   const onMainPointerDown = (event: ReactPointerEvent<HTMLButtonElement>) => {
@@ -381,7 +393,7 @@ export function FloatingController({ targets }: FloatingControllerProps) {
         <button
           key={item.id}
           data-paintgpt-control="true"
-          className={`paintgpt-orbit-button${item.active ? " is-active" : ""}${item.id === "done" ? " is-done" : ""}`}
+          className={`paintgpt-orbit-button${item.active ? " is-active" : ""}${item.id === "done" ? " is-done" : ""}${item.id === "clear" ? " is-clear" : ""}`}
           style={{ left: primaryPositions[index].left, top: primaryPositions[index].top }}
           title={item.label}
           aria-label={item.label}

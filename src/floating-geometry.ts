@@ -149,6 +149,22 @@ export function computeRadialPositions(
   });
 }
 
+/** Keeps the original six primary actions on the inner arc and places any
+ * additional one-tap actions on a second ring so buttons never crowd together. */
+export function computePrimaryMenuPositions(
+  main: FloatingPosition,
+  side: FloatingSide,
+  count: number,
+  viewport: ViewportSize,
+): RadialPosition[] {
+  const innerCount = Math.min(6, count);
+  const outerCount = Math.max(0, count - innerCount);
+  return [
+    ...computeRadialPositions(main, side, innerCount, viewport),
+    ...computeRadialPositions(main, side, outerCount, viewport, 154),
+  ];
+}
+
 export function selectBestVisibleAnswer<T extends SelectableAnswer>(
   answers: T[],
   viewport: ViewportSize,
