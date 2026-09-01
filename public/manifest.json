@@ -1,0 +1,19 @@
+{
+  "manifest_version": 3,
+  "name": "答案批注画板",
+  "version": "0.2.0",
+  "description": "用数位笔直接在 ChatGPT 回答上圈画和批注，数据仅保存在本机。",
+  "action": {
+    "default_title": "答案批注画板"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://chatgpt.com/*",
+        "https://chat.openai.com/*"
+      ],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
