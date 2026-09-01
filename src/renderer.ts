@@ -69,39 +69,51 @@ export function renderPageStrokes(
   context.clearRect(0, 0, displaySize.width, displaySize.height);
 
   for (const stroke of strokes) {
-    if (stroke.points.length === 0) continue;
-    context.save();
-    context.globalAlpha = stroke.opacity;
-    context.strokeStyle = stroke.color;
-    context.fillStyle = stroke.color;
-    context.lineCap = "round";
-    context.lineJoin = "round";
-
-    if (stroke.points.length === 1) {
-      const point = stroke.points[0];
-      context.beginPath();
-      context.arc(
-        point.x - viewportOrigin.x,
-        point.y - viewportOrigin.y,
-        pressureWidth(stroke, point.pressure) / 2,
-        0,
-        Math.PI * 2,
-      );
-      context.fill();
-      context.restore();
-      continue;
-    }
-
-    for (let index = 1; index < stroke.points.length; index += 1) {
-      const start = stroke.points[index - 1];
-      const end = stroke.points[index];
-      context.lineWidth =
-        (pressureWidth(stroke, start.pressure) + pressureWidth(stroke, end.pressure)) / 2;
-      context.beginPath();
-      context.moveTo(start.x - viewportOrigin.x, start.y - viewportOrigin.y);
-      context.lineTo(end.x - viewportOrigin.x, end.y - viewportOrigin.y);
-      context.stroke();
-    }
-    context.restore();
+    renderPageStrokeSegments(context, stroke, 0, viewportOrigin, devicePixelRatio);
   }
+}
+
+/** Draws only the newly appended part of a page-space stroke. */
+export function renderPageStrokeSegments(
+  context: CanvasRenderingContext2D,
+  stroke: Stroke,
+  fromPointIndex: number,
+  viewportOrigin: { x: number; y: number },
+  devicePixelRatio: number,
+) {
+  if (stroke.points.length === 0) return;
+  context.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0);
+  context.save();
+  context.globalAlpha = stroke.opacity;
+  context.strokeStyle = stroke.color;
+  context.fillStyle = stroke.color;
+  context.lineCap = "round";
+  context.lineJoin = "round";
+
+  if (stroke.points.length === 1 && fromPointIndex === 0) {
+    const point = stroke.points[0];
+    context.beginPath();
+    context.arc(
+      point.x - viewportOrigin.x,
+      point.y - viewportOrigin.y,
+      pressureWidth(stroke, point.pressure) / 2,
+      0,
+      Math.PI * 2,
+    );
+    context.fill();
+    context.restore();
+    return;
+  }
+
+  for (let index = Math.max(1, fromPointIndex); index < stroke.points.length; index += 1) {
+    const start = stroke.points[index - 1];
+    const end = stroke.points[index];
+    context.lineWidth =
+      (pressureWidth(stroke, start.pressure) + pressureWidth(stroke, end.pressure)) / 2;
+    context.beginPath();
+    context.moveTo(start.x - viewportOrigin.x, start.y - viewportOrigin.y);
+    context.lineTo(end.x - viewportOrigin.x, end.y - viewportOrigin.y);
+    context.stroke();
+  }
+  context.restore();
 }

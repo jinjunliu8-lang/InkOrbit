@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { renderPageStrokes } from "../src/renderer";
+import { renderPageStrokeSegments, renderPageStrokes } from "../src/renderer";
 import type { Stroke } from "../src/types";
 
 function fakeContext() {
@@ -50,5 +50,35 @@ describe("page-space renderer", () => {
     expect(context.clearRect).toHaveBeenCalledWith(0, 0, 800, 600);
     expect(context.moveTo).toHaveBeenCalledWith(25, 50);
     expect(context.lineTo).toHaveBeenCalledWith(45, 80);
+  });
+
+  it("draws only points appended since the previous pointer event", () => {
+    const context = fakeContext();
+    const stroke: Stroke = {
+      id: "stroke-live",
+      tool: "pen",
+      color: "#000",
+      baseWidth: 3,
+      opacity: 1,
+      points: [
+        { x: 10, y: 10, pressure: 0.5, time: 0 },
+        { x: 20, y: 20, pressure: 0.5, time: 1 },
+        { x: 30, y: 25, pressure: 0.5, time: 2 },
+        { x: 40, y: 35, pressure: 0.5, time: 3 },
+      ],
+    };
+
+    renderPageStrokeSegments(
+      context as unknown as CanvasRenderingContext2D,
+      stroke,
+      3,
+      { x: 0, y: 0 },
+      1.5,
+    );
+
+    expect(context.moveTo).toHaveBeenCalledTimes(1);
+    expect(context.moveTo).toHaveBeenCalledWith(30, 25);
+    expect(context.lineTo).toHaveBeenCalledWith(40, 35);
+    expect(context.clearRect).not.toHaveBeenCalled();
   });
 });

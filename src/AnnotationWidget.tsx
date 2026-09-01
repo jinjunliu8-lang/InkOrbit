@@ -8,7 +8,7 @@ import {
   type PointerEvent as ReactPointerEvent,
 } from "react";
 import { eraseStrokesAt } from "./geometry";
-import { renderPageStrokes, renderStrokes } from "./renderer";
+import { renderPageStrokeSegments, renderPageStrokes, renderStrokes } from "./renderer";
 import { loadAnnotation, saveAnnotation } from "./storage";
 import type {
   ActiveTool,
@@ -79,6 +79,7 @@ export const AnnotationWidget = forwardRef<AnnotationController, AnnotationWidge
   const frameRef = useRef<number | null>(null);
   const coordinateSpaceRef = useRef<CoordinateSpace>("page");
   const scrollContainerRef = useRef<HTMLElement | null>(null);
+  const pixelRatioRef = useRef(1);
 
   const [strokes, setStrokes] = useState<Stroke[]>([]);
   const [editing, setEditing] = useState(false);
@@ -100,7 +101,7 @@ export const AnnotationWidget = forwardRef<AnnotationController, AnnotationWidge
     const visibleStrokes = currentStrokeRef.current
       ? [...strokesRef.current, currentStrokeRef.current]
       : strokesRef.current;
-    const ratio = Math.max(1, window.devicePixelRatio || 1);
+    const ratio = pixelRatioRef.current;
     if (coordinateSpaceRef.current === "page") {
       renderPageStrokes(
         context,
@@ -121,6 +122,27 @@ export const AnnotationWidget = forwardRef<AnnotationController, AnnotationWidge
       drawNow();
     });
   }, [drawNow]);
+
+  const drawCurrentStrokeIncrementally = useCallback(
+    (fromPointIndex: number) => {
+      const canvas = canvasRef.current;
+      const stroke = currentStrokeRef.current;
+      if (!canvas || !stroke || coordinateSpaceRef.current !== "page") {
+        scheduleDraw();
+        return;
+      }
+      const context = canvas.getContext("2d");
+      if (!context) return;
+      renderPageStrokeSegments(
+        context,
+        stroke,
+        fromPointIndex,
+        viewportOrigin(scrollContainerRef.current),
+        pixelRatioRef.current,
+      );
+    },
+    [scheduleDraw],
+  );
 
   const persist = useCallback(
     async (nextStrokes: Stroke[]) => {
@@ -237,9 +259,14 @@ export const AnnotationWidget = forwardRef<AnnotationController, AnnotationWidge
       if (baseSizeRef.current.width <= 0 || baseSizeRef.current.height <= 0) {
         baseSizeRef.current = displaySize;
       }
-      const ratio = Math.max(1, window.devicePixelRatio || 1);
-      const pixelWidth = Math.max(1, Math.round(displaySize.width * ratio));
-      const pixelHeight = Math.max(1, Math.round(displaySize.height * ratio));
+      const deviceRatio = Math.max(1, window.devicePixelRatio || 1);
+      // During writing, 1.5x is visually crisp but substantially cheaper than
+      // a full 2x/3x viewport bitmap. Finished ink is redrawn up to 2x.
+      const ratio = Math.min(editing ? 1.5 : 2, deviceRatio);
+      pixelRatioRef.current = ratio;
+      const needsBitmap = editing || strokesRef.current.length > 0 || currentStrokeRef.current !== null;
+      const pixelWidth = needsBitmap ? Math.max(1, Math.round(displaySize.width * ratio)) : 1;
+      const pixelHeight = needsBitmap ? Math.max(1, Math.round(displaySize.height * ratio)) : 1;
       if (canvas.width !== pixelWidth) canvas.width = pixelWidth;
       if (canvas.height !== pixelHeight) canvas.height = pixelHeight;
 
@@ -264,7 +291,7 @@ export const AnnotationWidget = forwardRef<AnnotationController, AnnotationWidge
       window.removeEventListener("resize", resize);
       document.removeEventListener("scroll", scheduleDraw, true);
     };
-  }, [coordinateSpace, messageElement, scheduleDraw]);
+  }, [coordinateSpace, editing, messageElement, scheduleDraw, strokes.length]);
 
   useEffect(() => {
     strokesRef.current = strokes;
@@ -339,7 +366,7 @@ export const AnnotationWidget = forwardRef<AnnotationController, AnnotationWidge
       opacity: drawingTool === "highlighter" ? 0.3 : 1,
       points: [eventToPoint(event.nativeEvent)],
     };
-    scheduleDraw();
+    drawCurrentStrokeIncrementally(0);
   };
 
   const handlePointerMove = (event: ReactPointerEvent<HTMLCanvasElement>) => {
@@ -347,6 +374,7 @@ export const AnnotationWidget = forwardRef<AnnotationController, AnnotationWidge
     event.preventDefault();
     const nativeEvents = event.nativeEvent.getCoalescedEvents?.() ?? [event.nativeEvent];
     if (currentStrokeRef.current) {
+      const fromPointIndex = currentStrokeRef.current.points.length;
       for (const nativeEvent of nativeEvents) {
         const point = eventToPoint(nativeEvent);
         const previous = currentStrokeRef.current.points.at(-1);
@@ -354,7 +382,7 @@ export const AnnotationWidget = forwardRef<AnnotationController, AnnotationWidge
           currentStrokeRef.current.points.push(point);
         }
       }
-      scheduleDraw();
+      drawCurrentStrokeIncrementally(fromPointIndex);
       return;
     }
     for (const nativeEvent of nativeEvents) eraseAtEvent(nativeEvent);
