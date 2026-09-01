@@ -25,6 +25,7 @@ interface RegisteredSession {
   session: DrawingSurfaceSession;
   source: Stroke[] | null;
   index: StrokeGridIndex;
+  scroller: HTMLElement | null;
 }
 
 interface ScrollTargets {
@@ -160,6 +161,13 @@ export class PageDrawingSurface {
   private liveFrame: number | null = null;
   private idleQualityTimer: number | null = null;
   private scrollFrame: number | null = null;
+  private wheelFrame: number | null = null;
+  private wheelTargets: ScrollTargets | null = null;
+  private wheelDeltaX = 0;
+  private wheelDeltaY = 0;
+  private wheelLastAt = -Infinity;
+  private wheelLastClientX = 0;
+  private wheelLastClientY = 0;
   private spaceDown = false;
   private interactiveRatioIndex = 2;
   private averageFrameMs = 0;
@@ -181,7 +189,6 @@ export class PageDrawingSurface {
 
     this.live.addEventListener("pointerdown", this.onPointerDown);
     this.live.addEventListener("pointermove", this.onPointerMove);
-    if ("onpointerrawupdate" in window) this.live.addEventListener("pointerrawupdate", this.onPointerMove as EventListener);
     this.live.addEventListener("pointerup", this.onPointerUp);
     this.live.addEventListener("pointercancel", this.onPointerCancel);
     this.live.addEventListener("wheel", this.onWheel, { passive: false });
@@ -198,7 +205,12 @@ export class PageDrawingSurface {
   }
 
   register(id: string, session: DrawingSurfaceSession) {
-    this.sessions.set(id, { session, source: null, index: new StrokeGridIndex() });
+    this.sessions.set(id, {
+      session,
+      source: null,
+      index: new StrokeGridIndex(),
+      scroller: findPrimaryScroller(session.element),
+    });
     this.scheduleCommittedDraw();
     return () => {
       if (this.activeId === id) this.deactivate(id);
@@ -239,10 +251,10 @@ export class PageDrawingSurface {
     if (this.committedFrame !== null) cancelAnimationFrame(this.committedFrame);
     if (this.liveFrame !== null) cancelAnimationFrame(this.liveFrame);
     if (this.scrollFrame !== null) cancelAnimationFrame(this.scrollFrame);
+    if (this.wheelFrame !== null) cancelAnimationFrame(this.wheelFrame);
     if (this.idleQualityTimer !== null) window.clearTimeout(this.idleQualityTimer);
     this.live.removeEventListener("pointerdown", this.onPointerDown);
     this.live.removeEventListener("pointermove", this.onPointerMove);
-    if ("onpointerrawupdate" in window) this.live.removeEventListener("pointerrawupdate", this.onPointerMove as EventListener);
     this.live.removeEventListener("pointerup", this.onPointerUp);
     this.live.removeEventListener("pointercancel", this.onPointerCancel);
     this.live.removeEventListener("wheel", this.onWheel);
@@ -287,13 +299,19 @@ export class PageDrawingSurface {
     context.clearRect(0, 0, innerWidth, innerHeight);
   }
 
-  private ensureIndex(registered: RegisteredSession) {
-    const strokes = registered.session.getSnapshot().strokes;
+  private ensureIndex(registered: RegisteredSession, strokes = registered.session.getSnapshot().strokes) {
     if (registered.source !== strokes) {
       registered.source = strokes;
       registered.index.rebuild(strokes);
     }
     return registered;
+  }
+
+  private sessionScroller(registered: RegisteredSession) {
+    if (registered.scroller && !registered.scroller.isConnected) {
+      registered.scroller = findPrimaryScroller(registered.session.element);
+    }
+    return registered.scroller;
   }
 
   private visibleBounds(scroller: HTMLElement | null): Bounds {
@@ -308,10 +326,12 @@ export class PageDrawingSurface {
 
   private drawCommitted = (ratio = this.canvasRatio(this.committed)) => {
     const started = performance.now();
-    const hasAnyInk = Array.from(this.sessions.values()).some(
-      (registered) => registered.session.getSnapshot().strokes.length > 0,
-    );
-    if (!hasAnyInk) {
+    const drawable = Array.from(this.sessions, ([id, registered]) => ({
+      id,
+      registered,
+      strokes: registered.session.getSnapshot().strokes,
+    })).filter(({ strokes }) => strokes.length > 0);
+    if (drawable.length === 0) {
       this.committed.width = 1;
       this.committed.height = 1;
       this.committed.dataset.ratio = "1";
@@ -321,13 +341,18 @@ export class PageDrawingSurface {
     this.clearCanvas(this.committed);
     const context = this.committed.getContext("2d");
     if (!context) return;
-    for (const [id, registered] of this.sessions) {
-      const scroller = findPrimaryScroller(registered.session.element);
-      const origin = viewportOrigin(scroller);
+    const viewportCache = new Map<HTMLElement | null, { origin: { x: number; y: number }; bounds: Bounds }>();
+    for (const { id, registered, strokes } of drawable) {
+      const scroller = this.sessionScroller(registered);
+      let viewport = viewportCache.get(scroller);
+      if (!viewport) {
+        viewport = { origin: viewportOrigin(scroller), bounds: this.visibleBounds(scroller) };
+        viewportCache.set(scroller, viewport);
+      }
       const isWorkingErase = id === this.activeId && this.gesture?.mode === "erasing" && this.gesture.workingStrokes;
-      const indexed = isWorkingErase ? registered : this.ensureIndex(registered);
-      for (const stroke of indexed.index.query(this.visibleBounds(scroller))) {
-        renderPageStrokeSegments(context, stroke, 0, origin, ratio);
+      const indexed = isWorkingErase ? registered : this.ensureIndex(registered, strokes);
+      for (const stroke of indexed.index.query(viewport.bounds)) {
+        renderPageStrokeSegments(context, stroke, 0, viewport.origin, ratio);
       }
     }
     this.recordFrame(performance.now() - started);
@@ -660,16 +685,38 @@ export class PageDrawingSurface {
     const session = this.activeSession();
     if (!session || event.ctrlKey) return;
     if (event.cancelable) event.preventDefault();
-    const targets = this.chooseScrollTargetsAt(event.clientX, event.clientY, session);
     let deltaX = normalizeWheelDelta(event.deltaX, event.deltaMode, innerWidth);
     let deltaY = normalizeWheelDelta(event.deltaY, event.deltaMode, innerHeight);
     if (event.shiftKey && deltaX === 0) {
       deltaX = deltaY;
       deltaY = 0;
     }
-    scrollByAxis(targets.horizontal, "x", deltaX);
-    scrollByAxis(targets.vertical, "y", deltaY);
+    const sameWheelGesture = event.timeStamp - this.wheelLastAt < 160 &&
+      movement(this.wheelLastClientX, this.wheelLastClientY, event.clientX, event.clientY) < 48;
+    if (!sameWheelGesture || !this.wheelTargets) {
+      this.flushWheel();
+      this.wheelTargets = this.chooseScrollTargetsAt(event.clientX, event.clientY, session);
+    }
+    this.wheelDeltaX += deltaX;
+    this.wheelDeltaY += deltaY;
+    this.wheelLastAt = event.timeStamp;
+    this.wheelLastClientX = event.clientX;
+    this.wheelLastClientY = event.clientY;
+    if (this.wheelFrame === null) {
+      this.wheelFrame = requestAnimationFrame(() => {
+        this.wheelFrame = null;
+        this.flushWheel();
+      });
+    }
   };
+
+  private flushWheel() {
+    if (!this.wheelTargets) return;
+    scrollByAxis(this.wheelTargets.horizontal, "x", this.wheelDeltaX);
+    scrollByAxis(this.wheelTargets.vertical, "y", this.wheelDeltaY);
+    this.wheelDeltaX = 0;
+    this.wheelDeltaY = 0;
+  }
 
   private onContextMenu = (event: MouseEvent) => {
     if (this.activeId) event.preventDefault();
@@ -679,8 +726,7 @@ export class PageDrawingSurface {
     if (this.scrollFrame === null) {
       this.scrollFrame = requestAnimationFrame(() => {
         this.scrollFrame = null;
-        const ratio = this.gesture ? this.interactiveRatio() : this.canvasRatio(this.committed);
-        this.drawCommitted(ratio);
+        this.drawCommitted(this.interactiveRatio());
         if (this.gesture?.stroke) {
           this.clearCanvas(this.live);
           this.gesture.renderedPointCount = 0;

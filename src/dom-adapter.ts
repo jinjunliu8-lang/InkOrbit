@@ -23,6 +23,12 @@ export function findAssistantMessages(root: ParentNode = document): HTMLElement[
 }
 
 export function getAnswerText(element: HTMLElement): string {
+  // In real browsers innerText already excludes our display:none host. Avoid
+  // cloning a potentially very large answer during every observer scan.
+  if (typeof element.innerText === "string") return normalizeAnswerText(element.innerText);
+
+  // jsdom and older DOM implementations may not expose innerText. Keep the
+  // clone-based fallback so injected extension text is never hashed.
   const clone = element.cloneNode(true) as HTMLElement;
   clone.querySelectorAll('[data-paintgpt-annotation-host="true"]').forEach((host) => host.remove());
   return normalizeAnswerText(clone.innerText || clone.textContent || "");

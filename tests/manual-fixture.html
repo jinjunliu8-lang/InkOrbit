@@ -55,6 +55,7 @@
         clientY: y,
         pressure: buttons ? 0.55 : 0,
       });
+      const nextFrame = () => new Promise((resolve) => requestAnimationFrame(() => resolve()));
       simulateButton.addEventListener("click", async () => {
         const surfaceHost = document.querySelector('[data-paintgpt-surface-host="true"]');
         const live = surfaceHost?.shadowRoot?.querySelector(".inkorbit-live");
@@ -110,6 +111,7 @@
           deltaY: 135,
           deltaMode: WheelEvent.DOM_DELTA_PIXEL,
         }));
+        await nextFrame();
         const afterWheel = conversationScroll.scrollTop;
 
         const beforeConcurrentWheel = conversationScroll.scrollTop;
@@ -123,6 +125,7 @@
           deltaY: 110,
           deltaMode: WheelEvent.DOM_DELTA_PIXEL,
         }));
+        await nextFrame();
         live.dispatchEvent(pointerEvent("pointermove", 100, 455, 315, "pen"));
         live.dispatchEvent(pointerEvent("pointerup", 100, 455, 315, "pen", 0, 0));
         const afterConcurrentWheel = conversationScroll.scrollTop;

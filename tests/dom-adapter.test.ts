@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   findAssistantMessages,
   getAnswerText,
@@ -55,6 +55,14 @@ describe("ChatGPT DOM adapter", () => {
       </div>
     `;
     expect(getAnswerText(findAssistantMessages()[0])).toBe("Original answer");
+  });
+
+  it("uses the browser innerText fast path without cloning long answers", () => {
+    const answer = document.createElement("div");
+    Object.defineProperty(answer, "innerText", { value: "  Fast   answer  ", configurable: true });
+    const clone = vi.spyOn(answer, "cloneNode");
+    expect(getAnswerText(answer)).toBe("Fast answer");
+    expect(clone).not.toHaveBeenCalled();
   });
 
   it("extracts conversation ids and detects generation controls", () => {
