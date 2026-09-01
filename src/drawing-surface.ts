@@ -32,6 +32,13 @@ interface ScrollTargets {
   vertical: HTMLElement | Window | null;
 }
 
+interface SecondaryPan {
+  pointerId: number;
+  lastClientX: number;
+  lastClientY: number;
+  scrollTargets: ScrollTargets;
+}
+
 type GestureMode = "pending" | "drawing" | "erasing" | "panning";
 
 interface Gesture {
@@ -123,6 +130,12 @@ function classifyPendingGesture(elapsedMs: number, distancePx: number): "pending
   return elapsedMs >= LONG_PRESS_MS ? "panning" : "pending";
 }
 
+function normalizeWheelDelta(delta: number, deltaMode: number, viewportSize: number) {
+  if (deltaMode === WheelEvent.DOM_DELTA_LINE) return delta * 16;
+  if (deltaMode === WheelEvent.DOM_DELTA_PAGE) return delta * viewportSize;
+  return delta;
+}
+
 function surfaceStyles() {
   return `
     :host { position: fixed; inset: 0; pointer-events: none; }
@@ -142,6 +155,7 @@ export class PageDrawingSurface {
   private readonly sessions = new Map<string, RegisteredSession>();
   private activeId: string | null = null;
   private gesture: Gesture | null = null;
+  private secondaryPan: SecondaryPan | null = null;
   private committedFrame: number | null = null;
   private liveFrame: number | null = null;
   private idleQualityTimer: number | null = null;
@@ -170,6 +184,7 @@ export class PageDrawingSurface {
     if ("onpointerrawupdate" in window) this.live.addEventListener("pointerrawupdate", this.onPointerMove as EventListener);
     this.live.addEventListener("pointerup", this.onPointerUp);
     this.live.addEventListener("pointercancel", this.onPointerCancel);
+    this.live.addEventListener("wheel", this.onWheel, { passive: false });
     this.live.addEventListener("contextmenu", this.onContextMenu);
     document.addEventListener("scroll", this.onScroll, true);
     document.addEventListener("keydown", this.onKeyDown, true);
@@ -208,6 +223,7 @@ export class PageDrawingSurface {
 
   deactivate(id?: string) {
     if (id && this.activeId !== id) return;
+    this.finishSecondaryPan();
     this.cancelGesture(false);
     this.activeId = null;
     this.root.classList.remove("is-editing", "is-panning");
@@ -218,6 +234,7 @@ export class PageDrawingSurface {
   }
 
   destroy() {
+    this.finishSecondaryPan();
     this.cancelGesture(false);
     if (this.committedFrame !== null) cancelAnimationFrame(this.committedFrame);
     if (this.liveFrame !== null) cancelAnimationFrame(this.liveFrame);
@@ -228,6 +245,7 @@ export class PageDrawingSurface {
     if ("onpointerrawupdate" in window) this.live.removeEventListener("pointerrawupdate", this.onPointerMove as EventListener);
     this.live.removeEventListener("pointerup", this.onPointerUp);
     this.live.removeEventListener("pointercancel", this.onPointerCancel);
+    this.live.removeEventListener("wheel", this.onWheel);
     this.live.removeEventListener("contextmenu", this.onContextMenu);
     document.removeEventListener("scroll", this.onScroll, true);
     document.removeEventListener("keydown", this.onKeyDown, true);
@@ -351,8 +369,8 @@ export class PageDrawingSurface {
     } satisfies Stroke;
   }
 
-  private chooseScrollTargets(event: PointerEvent, session: DrawingSurfaceSession): ScrollTargets {
-    const elements = document.elementsFromPoint(event.clientX, event.clientY);
+  private chooseScrollTargetsAt(clientX: number, clientY: number, session: DrawingSurfaceSession): ScrollTargets {
+    const elements = document.elementsFromPoint(clientX, clientY);
     const underlying = elements.find((element) =>
       element !== this.host && !this.host.contains(element) &&
       !element.closest('[data-paintgpt-floating-host="true"]')) ?? session.element;
@@ -364,6 +382,36 @@ export class PageDrawingSurface {
     };
   }
 
+  private chooseScrollTargets(event: PointerEvent, session: DrawingSurfaceSession) {
+    return this.chooseScrollTargetsAt(event.clientX, event.clientY, session);
+  }
+
+  private updatePanningClass() {
+    this.root.classList.toggle("is-panning", this.gesture?.mode === "panning" || Boolean(this.secondaryPan));
+  }
+
+  private startSecondaryPan(event: PointerEvent, session: DrawingSurfaceSession) {
+    if (event.cancelable) event.preventDefault();
+    this.live.setPointerCapture(event.pointerId);
+    this.secondaryPan = {
+      pointerId: event.pointerId,
+      lastClientX: event.clientX,
+      lastClientY: event.clientY,
+      scrollTargets: this.chooseScrollTargets(event, session),
+    };
+    this.updatePanningClass();
+  }
+
+  private finishSecondaryPan(pointerId?: number) {
+    const pan = this.secondaryPan;
+    if (!pan || (pointerId !== undefined && pan.pointerId !== pointerId)) return false;
+    if (this.live.hasPointerCapture(pan.pointerId)) this.live.releasePointerCapture(pan.pointerId);
+    this.secondaryPan = null;
+    this.updatePanningClass();
+    this.scheduleHighQualityDraw();
+    return true;
+  }
+
   private enterPan(event: PointerEvent, gesture: Gesture, session: DrawingSurfaceSession) {
     if (gesture.longPressTimer !== null) window.clearTimeout(gesture.longPressTimer);
     gesture.longPressTimer = null;
@@ -371,7 +419,7 @@ export class PageDrawingSurface {
     gesture.stroke = null;
     gesture.scrollTargets = this.chooseScrollTargets(event, session);
     this.clearCanvas(this.live);
-    this.root.classList.add("is-panning");
+    this.updatePanningClass();
   }
 
   private startDrawing(gesture: Gesture) {
@@ -453,7 +501,7 @@ export class PageDrawingSurface {
       }
     }
     this.gesture = null;
-    this.root.classList.remove("is-panning");
+    this.updatePanningClass();
     this.clearCanvas(this.live);
     this.resizeCanvas(this.live, this.interactiveRatio());
     this.scheduleCommittedDraw();
@@ -467,7 +515,13 @@ export class PageDrawingSurface {
 
   private onPointerDown = (event: PointerEvent) => {
     const session = this.activeSession();
-    if (!session || this.gesture) return;
+    if (!session) return;
+    if (this.gesture) {
+      if (event.pointerType === "touch" && !this.secondaryPan && this.gesture.pointerType !== "touch") {
+        this.startSecondaryPan(event, session);
+      }
+      return;
+    }
     const isMiddleMouse = event.pointerType === "mouse" && event.button === 1;
     const isPenSideButton = event.pointerType === "pen" && (event.button === 2 || event.buttons === 2);
     const isPenEraser = event.pointerType === "pen" && event.button === 5;
@@ -500,7 +554,7 @@ export class PageDrawingSurface {
     this.gesture = gesture;
 
     if (immediatePan) {
-      this.root.classList.add("is-panning");
+      this.updatePanningClass();
     } else if (event.pointerType === "pen") {
       if (gesture.stroke) this.queueLiveDraw();
       gesture.longPressTimer = window.setTimeout(() => {
@@ -514,6 +568,16 @@ export class PageDrawingSurface {
   };
 
   private onPointerMove = (event: PointerEvent) => {
+    if (this.secondaryPan?.pointerId === event.pointerId) {
+      if (event.cancelable) event.preventDefault();
+      const deltaX = event.clientX - this.secondaryPan.lastClientX;
+      const deltaY = event.clientY - this.secondaryPan.lastClientY;
+      scrollByAxis(this.secondaryPan.scrollTargets.horizontal, "x", -deltaX);
+      scrollByAxis(this.secondaryPan.scrollTargets.vertical, "y", -deltaY);
+      this.secondaryPan.lastClientX = event.clientX;
+      this.secondaryPan.lastClientY = event.clientY;
+      return;
+    }
     const gesture = this.gesture;
     const session = this.activeSession();
     if (!gesture || !session || gesture.pointerId !== event.pointerId) return;
@@ -572,8 +636,12 @@ export class PageDrawingSurface {
   };
 
   private onPointerUp = (event: PointerEvent) => {
+    if (this.finishSecondaryPan(event.pointerId)) {
+      if (event.cancelable) event.preventDefault();
+      return;
+    }
     if (this.gesture?.pointerId !== event.pointerId) return;
-    event.preventDefault();
+    if (event.cancelable) event.preventDefault();
     const session = this.activeSession();
     if (session && this.gesture.mode === "pending" && !this.gesture.stroke) {
       this.startErasing(this.gesture);
@@ -583,8 +651,24 @@ export class PageDrawingSurface {
   };
 
   private onPointerCancel = (event: PointerEvent) => {
+    if (this.finishSecondaryPan(event.pointerId)) return;
     if (this.gesture?.pointerId !== event.pointerId) return;
     this.finishGesture(false);
+  };
+
+  private onWheel = (event: WheelEvent) => {
+    const session = this.activeSession();
+    if (!session || event.ctrlKey) return;
+    if (event.cancelable) event.preventDefault();
+    const targets = this.chooseScrollTargetsAt(event.clientX, event.clientY, session);
+    let deltaX = normalizeWheelDelta(event.deltaX, event.deltaMode, innerWidth);
+    let deltaY = normalizeWheelDelta(event.deltaY, event.deltaMode, innerHeight);
+    if (event.shiftKey && deltaX === 0) {
+      deltaX = deltaY;
+      deltaY = 0;
+    }
+    scrollByAxis(targets.horizontal, "x", deltaX);
+    scrollByAxis(targets.vertical, "y", deltaY);
   };
 
   private onContextMenu = (event: MouseEvent) => {
@@ -619,6 +703,7 @@ export class PageDrawingSurface {
 
   private onWindowBlur = () => {
     this.spaceDown = false;
+    this.finishSecondaryPan();
     this.cancelGesture(false);
   };
 
@@ -633,4 +718,9 @@ export class PageDrawingSurface {
 }
 
 export const drawingGestureConstants = { LONG_PRESS_MS, MOVE_TOLERANCE };
-export const drawingSurfaceTestHelpers = { movement, shouldStartDrawing, classifyPendingGesture };
+export const drawingSurfaceTestHelpers = {
+  movement,
+  shouldStartDrawing,
+  classifyPendingGesture,
+  normalizeWheelDelta,
+};

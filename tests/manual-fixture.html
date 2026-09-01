@@ -6,6 +6,7 @@
     <title>InkOrbit manual fixture</title>
     <style>
       body { margin: 0; font: 16px/1.7 system-ui, sans-serif; }
+      #conversation-scroll { height: 100vh; overflow-y: auto; overscroll-behavior: contain; }
       main { width: min(760px, calc(100% - 48px)); margin: 80px auto; }
       section { min-height: 1500px; }
       #simulate-pen { position: fixed; left: 16px; top: 16px; z-index: 2147483647; }
@@ -13,7 +14,7 @@
   </head>
   <body>
     <button id="simulate-pen" type="button">模拟数位笔：长按拖页后继续书写</button>
-    <main>
+    <div id="conversation-scroll"><main>
       <section data-turn="assistant" data-turn-id="fixture-answer">
         <div data-message-author-role="assistant">
           <h1>InkOrbit 页面画布测试</h1>
@@ -29,7 +30,7 @@
         </div>
       </section>
       <div id="many-answers"></div>
-    </main>
+    </main></div>
     <script>
       const manyAnswers = document.querySelector("#many-answers");
       for (let index = 3; index <= 50; index += 1) {
@@ -61,45 +62,82 @@
         live.setPointerCapture = () => {};
         live.releasePointerCapture = () => {};
         live.hasPointerCapture = () => false;
-        const startScroll = window.scrollY;
+        const conversationScroll = document.querySelector("#conversation-scroll");
+        const startScroll = conversationScroll.scrollTop;
 
         live.dispatchEvent(pointerEvent("pointerdown", 91, 700, 520));
         await new Promise((resolve) => setTimeout(resolve, 220));
         live.dispatchEvent(pointerEvent("pointermove", 91, 700, 330));
         live.dispatchEvent(pointerEvent("pointerup", 91, 700, 330, "pen", 0, 0));
-        const afterPan = window.scrollY;
+        const afterPan = conversationScroll.scrollTop;
 
         live.dispatchEvent(pointerEvent("pointerdown", 92, 360, 260));
         live.dispatchEvent(pointerEvent("pointermove", 92, 450, 310));
         live.dispatchEvent(pointerEvent("pointerup", 92, 450, 310, "pen", 0, 0));
 
-        const beforeTouch = window.scrollY;
+        const beforeTouch = conversationScroll.scrollTop;
         live.dispatchEvent(pointerEvent("pointerdown", 93, 700, 500, "touch"));
         live.dispatchEvent(pointerEvent("pointermove", 93, 700, 410, "touch"));
         live.dispatchEvent(pointerEvent("pointerup", 93, 700, 410, "touch", 0, 0));
-        const afterTouch = window.scrollY;
+        const afterTouch = conversationScroll.scrollTop;
 
-        const beforeMiddle = window.scrollY;
+        const beforeMiddle = conversationScroll.scrollTop;
         live.dispatchEvent(pointerEvent("pointerdown", 94, 700, 500, "mouse", 1, 4));
         live.dispatchEvent(pointerEvent("pointermove", 94, 700, 420, "mouse", 1, 4));
         live.dispatchEvent(pointerEvent("pointerup", 94, 700, 420, "mouse", 1, 0));
-        const afterMiddle = window.scrollY;
+        const afterMiddle = conversationScroll.scrollTop;
 
-        const beforeSideButton = window.scrollY;
+        const beforeSideButton = conversationScroll.scrollTop;
         live.dispatchEvent(pointerEvent("pointerdown", 96, 700, 500, "pen", 2, 2));
         live.dispatchEvent(pointerEvent("pointermove", 96, 700, 425, "pen", 2, 2));
         live.dispatchEvent(pointerEvent("pointerup", 96, 700, 425, "pen", 2, 0));
-        const afterSideButton = window.scrollY;
+        const afterSideButton = conversationScroll.scrollTop;
 
-        const beforeSpace = window.scrollY;
+        const beforeSpace = conversationScroll.scrollTop;
         document.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, cancelable: true, code: "Space" }));
         live.dispatchEvent(pointerEvent("pointerdown", 95, 700, 500, "mouse"));
         live.dispatchEvent(pointerEvent("pointermove", 95, 700, 430, "mouse"));
         live.dispatchEvent(pointerEvent("pointerup", 95, 700, 430, "mouse", 0, 0));
         document.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true, code: "Space" }));
-        const afterSpace = window.scrollY;
+        const afterSpace = conversationScroll.scrollTop;
 
-        window.scrollTo(0, 0);
+        const beforeWheel = conversationScroll.scrollTop;
+        live.dispatchEvent(new WheelEvent("wheel", {
+          bubbles: true,
+          cancelable: true,
+          clientX: 700,
+          clientY: 500,
+          deltaY: 135,
+          deltaMode: WheelEvent.DOM_DELTA_PIXEL,
+        }));
+        const afterWheel = conversationScroll.scrollTop;
+
+        const beforeConcurrentWheel = conversationScroll.scrollTop;
+        live.dispatchEvent(pointerEvent("pointerdown", 100, 350, 250, "pen"));
+        live.dispatchEvent(pointerEvent("pointermove", 100, 420, 290, "pen"));
+        live.dispatchEvent(new WheelEvent("wheel", {
+          bubbles: true,
+          cancelable: true,
+          clientX: 700,
+          clientY: 500,
+          deltaY: 110,
+          deltaMode: WheelEvent.DOM_DELTA_PIXEL,
+        }));
+        live.dispatchEvent(pointerEvent("pointermove", 100, 455, 315, "pen"));
+        live.dispatchEvent(pointerEvent("pointerup", 100, 455, 315, "pen", 0, 0));
+        const afterConcurrentWheel = conversationScroll.scrollTop;
+
+        const beforeConcurrentTouch = conversationScroll.scrollTop;
+        live.dispatchEvent(pointerEvent("pointerdown", 98, 360, 260, "pen"));
+        live.dispatchEvent(pointerEvent("pointermove", 98, 430, 300, "pen"));
+        live.dispatchEvent(pointerEvent("pointerdown", 99, 700, 500, "touch"));
+        live.dispatchEvent(pointerEvent("pointermove", 99, 700, 415, "touch"));
+        live.dispatchEvent(pointerEvent("pointerup", 99, 700, 415, "touch", 0, 0));
+        live.dispatchEvent(pointerEvent("pointermove", 98, 460, 320, "pen"));
+        live.dispatchEvent(pointerEvent("pointerup", 98, 460, 320, "pen", 0, 0));
+        const afterConcurrentTouch = conversationScroll.scrollTop;
+
+        conversationScroll.scrollTop = 0;
         const wideCode = document.querySelector("#wide-code");
         const codeRect = wideCode.getBoundingClientRect();
         const codeX = codeRect.left + codeRect.width / 2;
@@ -123,6 +161,12 @@
           afterSideButton,
           beforeSpace,
           afterSpace,
+          beforeWheel,
+          afterWheel,
+          beforeConcurrentWheel,
+          afterConcurrentWheel,
+          beforeConcurrentTouch,
+          afterConcurrentTouch,
           beforeCodeX,
           afterCodeX,
           editing: root.classList.contains("is-editing"),
