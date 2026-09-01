@@ -336,6 +336,8 @@ export function FloatingController({ targets }: FloatingControllerProps) {
       drag.moved = true;
     }
     if (!drag.moved) return;
+    event.preventDefault();
+    event.stopPropagation();
     setMenuOpen(false);
     setSecondaryTool(null);
     setPosition(clampFloatingPosition({ x: drag.origin.x + deltaX, y: drag.origin.y + deltaY }, viewport));
@@ -353,6 +355,20 @@ export function FloatingController({ targets }: FloatingControllerProps) {
     const deltaX = event.clientX - drag.startX;
     const deltaY = event.clientY - drag.startY;
     const snapped = snapFloatingPosition({ x: drag.origin.x + deltaX, y: drag.origin.y + deltaY }, viewport);
+    setPosition(snapped.position);
+    writeStoredPosition(snapped.stored);
+  };
+
+  const onMainPointerCancel = (event: ReactPointerEvent<HTMLButtonElement>) => {
+    const drag = dragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    dragRef.current = null;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    // A cancelled gesture is never a click. Snap the last visible position so
+    // the control remains usable after OS gestures or pen proximity changes.
+    const snapped = snapFloatingPosition(position, viewport);
     setPosition(snapped.position);
     writeStoredPosition(snapped.stored);
   };
@@ -403,7 +419,7 @@ export function FloatingController({ targets }: FloatingControllerProps) {
         onPointerDown={onMainPointerDown}
         onPointerMove={onMainPointerMove}
         onPointerUp={onMainPointerUp}
-        onPointerCancel={onMainPointerUp}
+        onPointerCancel={onMainPointerCancel}
         onKeyDown={(event) => {
           if (event.key === "Enter" || event.key === " ") {
             event.preventDefault();

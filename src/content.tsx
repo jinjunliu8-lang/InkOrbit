@@ -4,6 +4,7 @@ import { FloatingController, type FloatingTarget } from "./FloatingController";
 import {
   createAnswerIdentity,
   findAssistantMessages,
+  getConversationId,
   getAnswerText,
   isGeneratingGlobally,
 } from "./dom-adapter";
@@ -13,6 +14,19 @@ import type {
   AnnotationWidgetState,
   AnswerIdentity,
 } from "./types";
+
+declare global {
+  interface Window {
+    __inkOrbitCleanup?: () => void;
+  }
+}
+
+// A development reload or extension update can inject a new bundle into an
+// existing tab. Dispose a previous 0.3+ instance and remove legacy 0.2 hosts.
+window.__inkOrbitCleanup?.();
+document
+  .querySelectorAll('[data-paintgpt-floating-host="true"], [data-paintgpt-annotation-host="true"]')
+  .forEach((host) => host.remove());
 
 interface MountedAnswer {
   key: string;
@@ -34,6 +48,7 @@ const mounted = new Map<HTMLElement, MountedAnswer>();
 let scanTimer: number | null = null;
 let answerSequence = 0;
 let floatingRenderPending = false;
+let lastConversationId = getConversationId();
 
 const floatingHost = document.createElement("div");
 floatingHost.dataset.paintgptFloatingHost = "true";
@@ -67,21 +82,23 @@ function scheduleFloatingRender() {
 
 function ensureMounted(message: HTMLElement): MountedAnswer {
   const existing = mounted.get(message);
-  if (existing) return existing;
+  if (existing) {
+    if (!existing.host.isConnected) document.documentElement.appendChild(existing.host);
+    return existing;
+  }
 
   const originalPosition = message.style.position;
-  if (getComputedStyle(message).position === "static") message.style.position = "relative";
 
   const host = document.createElement("div");
   host.dataset.paintgptAnnotationHost = "true";
-  host.style.cssText = "position:absolute;inset:0;z-index:20;pointer-events:none;";
+  host.style.cssText = "position:fixed;inset:0;z-index:2147483645;pointer-events:none;";
   const shadow = host.attachShadow({ mode: "open" });
   const style = document.createElement("style");
   style.textContent = widgetStyles;
   const reactRoot = document.createElement("div");
-  reactRoot.style.cssText = "position:absolute;inset:0;pointer-events:none;";
+  reactRoot.style.cssText = "position:fixed;inset:0;pointer-events:none;";
   shadow.append(style, reactRoot);
-  message.appendChild(host);
+  document.documentElement.appendChild(host);
 
   let record: MountedAnswer;
   record = {
@@ -134,7 +151,8 @@ function renderRecord(message: HTMLElement, record: MountedAnswer, streaming: bo
 }
 
 function scheduleScan(delay = 100) {
-  if (scanTimer !== null) window.clearTimeout(scanTimer);
+  // Do not let continuous streaming mutations postpone the scan forever.
+  if (scanTimer !== null) return;
   scanTimer = window.setTimeout(() => {
     scanTimer = null;
     scan();
@@ -142,6 +160,18 @@ function scheduleScan(delay = 100) {
 }
 
 function scan() {
+  if (!floatingHost.isConnected) document.documentElement.appendChild(floatingHost);
+
+  const conversationId = getConversationId();
+  if (conversationId !== lastConversationId) {
+    lastConversationId = conversationId;
+    for (const [, record] of mounted) {
+      record.identity = null;
+      record.identityText = null;
+      record.hashingText = null;
+    }
+  }
+
   const messages = findAssistantMessages();
   const current = new Set(messages);
   const globallyGenerating = isGeneratingGlobally();
@@ -195,5 +225,21 @@ observer.observe(document.documentElement, {
   subtree: true,
 });
 
-window.setInterval(scan, 1500);
+const scanInterval = window.setInterval(scan, 1500);
+
+window.__inkOrbitCleanup = () => {
+  observer.disconnect();
+  if (scanTimer !== null) window.clearTimeout(scanTimer);
+  window.clearInterval(scanInterval);
+  for (const [message, record] of mounted) {
+    record.root.unmount();
+    record.host.remove();
+    if (message.isConnected) message.style.position = record.originalPosition;
+  }
+  mounted.clear();
+  floatingRoot.unmount();
+  floatingHost.remove();
+  delete window.__inkOrbitCleanup;
+};
+
 scan();

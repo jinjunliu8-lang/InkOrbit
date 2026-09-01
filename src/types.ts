@@ -34,6 +34,8 @@ export interface AnnotationDocument {
   messageId: string;
   contentHash: string;
   canvas: CanvasSize;
+  /** Missing on 0.2.x documents, where points were relative to one answer. */
+  coordinateSpace?: "answer" | "page";
   strokes: Stroke[];
   updatedAt: number;
 }

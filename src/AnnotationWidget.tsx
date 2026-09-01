@@ -8,7 +8,7 @@ import {
   type PointerEvent as ReactPointerEvent,
 } from "react";
 import { eraseStrokesAt } from "./geometry";
-import { renderStrokes } from "./renderer";
+import { renderPageStrokes, renderStrokes } from "./renderer";
 import { loadAnnotation, saveAnnotation } from "./storage";
 import type {
   ActiveTool,
@@ -29,6 +29,32 @@ interface AnnotationWidgetProps {
 }
 
 const PEN_COLORS = ["#1f2937", "#dc2626", "#2563eb"];
+type CoordinateSpace = "answer" | "page";
+
+function findScrollContainer(element: HTMLElement): HTMLElement | null {
+  for (let parent = element.parentElement; parent; parent = parent.parentElement) {
+    const style = getComputedStyle(parent);
+    if (/(auto|scroll|overlay)/.test(style.overflowY) && parent.scrollHeight > parent.clientHeight) {
+      return parent;
+    }
+  }
+  return null;
+}
+
+function viewportOrigin(scroller: HTMLElement | null) {
+  return {
+    x: window.scrollX + (scroller?.scrollLeft ?? 0),
+    y: window.scrollY + (scroller?.scrollTop ?? 0),
+  };
+}
+
+function pageSize(scroller: HTMLElement | null): CanvasSize {
+  const root = document.documentElement;
+  return {
+    width: Math.max(window.innerWidth, root.scrollWidth, scroller?.scrollWidth ?? 0),
+    height: Math.max(window.innerHeight, root.scrollHeight, scroller?.scrollHeight ?? 0),
+  };
+}
 
 function makeStrokeId() {
   return globalThis.crypto?.randomUUID?.() ?? `stroke-${Date.now()}-${Math.random().toString(16).slice(2)}`;
@@ -51,6 +77,8 @@ export const AnnotationWidget = forwardRef<AnnotationController, AnnotationWidge
   const eraseBeforeRef = useRef<Stroke[] | null>(null);
   const eraseChangedRef = useRef(false);
   const frameRef = useRef<number | null>(null);
+  const coordinateSpaceRef = useRef<CoordinateSpace>("page");
+  const scrollContainerRef = useRef<HTMLElement | null>(null);
 
   const [strokes, setStrokes] = useState<Stroke[]>([]);
   const [editing, setEditing] = useState(false);
@@ -62,6 +90,7 @@ export const AnnotationWidget = forwardRef<AnnotationController, AnnotationWidge
   const [layoutMismatch, setLayoutMismatch] = useState(false);
   const [storageError, setStorageError] = useState(false);
   const [historyRevision, setHistoryRevision] = useState(0);
+  const [coordinateSpace, setCoordinateSpace] = useState<CoordinateSpace>("page");
 
   const drawNow = useCallback(() => {
     const canvas = canvasRef.current;
@@ -71,14 +100,19 @@ export const AnnotationWidget = forwardRef<AnnotationController, AnnotationWidge
     const visibleStrokes = currentStrokeRef.current
       ? [...strokesRef.current, currentStrokeRef.current]
       : strokesRef.current;
-    renderStrokes(
-      context,
-      visibleStrokes,
-      baseSizeRef.current,
-      displaySizeRef.current,
-      Math.max(1, window.devicePixelRatio || 1),
-    );
-  }, []);
+    const ratio = Math.max(1, window.devicePixelRatio || 1);
+    if (coordinateSpaceRef.current === "page") {
+      renderPageStrokes(
+        context,
+        visibleStrokes,
+        displaySizeRef.current,
+        viewportOrigin(scrollContainerRef.current),
+        ratio,
+      );
+    } else {
+      renderStrokes(context, visibleStrokes, baseSizeRef.current, displaySizeRef.current, ratio);
+    }
+  }, [messageElement]);
 
   const scheduleDraw = useCallback(() => {
     if (frameRef.current !== null) return;
@@ -96,6 +130,7 @@ export const AnnotationWidget = forwardRef<AnnotationController, AnnotationWidge
           version: 1,
           ...identity,
           canvas: baseSizeRef.current,
+          coordinateSpace: coordinateSpaceRef.current,
           strokes: nextStrokes,
           updatedAt: Date.now(),
         });
@@ -132,6 +167,7 @@ export const AnnotationWidget = forwardRef<AnnotationController, AnnotationWidge
 
   useEffect(() => {
     let cancelled = false;
+    scrollContainerRef.current = findScrollContainer(messageElement);
     setLoading(true);
     setEditing(false);
     pastRef.current = [];
@@ -139,7 +175,10 @@ export const AnnotationWidget = forwardRef<AnnotationController, AnnotationWidge
     setHistoryRevision((revision) => revision + 1);
 
     if (!identity) {
+      coordinateSpaceRef.current = "page";
+      setCoordinateSpace("page");
       setVisibleStrokes([]);
+      setLoading(false);
       return () => {
         cancelled = true;
       };
@@ -148,11 +187,12 @@ export const AnnotationWidget = forwardRef<AnnotationController, AnnotationWidge
     void loadAnnotation(identity)
       .then((loaded) => {
         if (cancelled) return;
-        const rect = messageElement.getBoundingClientRect();
-        baseSizeRef.current = loaded.document?.canvas ?? {
-          width: Math.max(1, rect.width),
-          height: Math.max(1, rect.height),
-        };
+        const loadedSpace: CoordinateSpace = loaded.document
+          ? loaded.document.coordinateSpace ?? "answer"
+          : "page";
+        coordinateSpaceRef.current = loadedSpace;
+        setCoordinateSpace(loadedSpace);
+        baseSizeRef.current = loaded.document?.canvas ?? pageSize(scrollContainerRef.current);
         setVisibleStrokes(loaded.document?.strokes ?? []);
         setContentMismatch(loaded.contentMismatch);
         setStorageError(false);
@@ -160,8 +200,9 @@ export const AnnotationWidget = forwardRef<AnnotationController, AnnotationWidge
       .catch((error) => {
         if (cancelled) return;
         console.warn("[InkOrbit] 读取批注失败", error);
-        const rect = messageElement.getBoundingClientRect();
-        baseSizeRef.current = { width: Math.max(1, rect.width), height: Math.max(1, rect.height) };
+        coordinateSpaceRef.current = "page";
+        setCoordinateSpace("page");
+        baseSizeRef.current = pageSize(scrollContainerRef.current);
         setVisibleStrokes([]);
         setStorageError(true);
       })
@@ -179,7 +220,15 @@ export const AnnotationWidget = forwardRef<AnnotationController, AnnotationWidge
     if (!canvas) return;
 
     const resize = () => {
-      const rect = canvas.getBoundingClientRect();
+      scrollContainerRef.current = findScrollContainer(messageElement);
+      const isPage = coordinateSpaceRef.current === "page";
+      const rect = isPage
+        ? { left: 0, top: 0, width: window.innerWidth, height: window.innerHeight }
+        : messageElement.getBoundingClientRect();
+      canvas.style.left = `${rect.left}px`;
+      canvas.style.top = `${rect.top}px`;
+      canvas.style.width = `${Math.max(1, rect.width)}px`;
+      canvas.style.height = `${Math.max(1, rect.height)}px`;
       const displaySize = {
         width: Math.max(1, rect.width),
         height: Math.max(1, rect.height),
@@ -194,19 +243,28 @@ export const AnnotationWidget = forwardRef<AnnotationController, AnnotationWidge
       if (canvas.width !== pixelWidth) canvas.width = pixelWidth;
       if (canvas.height !== pixelHeight) canvas.height = pixelHeight;
 
+      const currentPageSize = pageSize(scrollContainerRef.current);
       const baseAspect = baseSizeRef.current.width / baseSizeRef.current.height;
       const displayAspect = displaySize.width / displaySize.height;
-      const mismatch =
-        strokesRef.current.length > 0 && Math.abs(displayAspect - baseAspect) / baseAspect > 0.06;
+      const mismatch = strokesRef.current.length > 0 && (isPage
+        ? Math.abs(currentPageSize.width - baseSizeRef.current.width) / baseSizeRef.current.width > 0.08
+        : Math.abs(displayAspect - baseAspect) / baseAspect > 0.06);
       setLayoutMismatch(mismatch);
       scheduleDraw();
     };
 
     const observer = new ResizeObserver(resize);
     observer.observe(messageElement);
+    observer.observe(document.documentElement);
+    window.addEventListener("resize", resize);
+    document.addEventListener("scroll", scheduleDraw, true);
     resize();
-    return () => observer.disconnect();
-  }, [messageElement, scheduleDraw]);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("resize", resize);
+      document.removeEventListener("scroll", scheduleDraw, true);
+    };
+  }, [coordinateSpace, messageElement, scheduleDraw]);
 
   useEffect(() => {
     strokesRef.current = strokes;
@@ -224,9 +282,18 @@ export const AnnotationWidget = forwardRef<AnnotationController, AnnotationWidge
     const rect = canvasRef.current!.getBoundingClientRect();
     const base = baseSizeRef.current;
     const pressure = event.pointerType === "mouse" ? 0.5 : event.pressure > 0 ? event.pressure : 0.5;
+    const origin = viewportOrigin(scrollContainerRef.current);
+    const point = coordinateSpaceRef.current === "page"
+      ? {
+          x: event.clientX + origin.x,
+          y: event.clientY + origin.y,
+        }
+      : {
+          x: ((event.clientX - rect.left) / Math.max(1, rect.width)) * base.width,
+          y: ((event.clientY - rect.top) / Math.max(1, rect.height)) * base.height,
+        };
     return {
-      x: ((event.clientX - rect.left) / Math.max(1, rect.width)) * base.width,
-      y: ((event.clientY - rect.top) / Math.max(1, rect.height)) * base.height,
+      ...point,
       pressure,
       time: event.timeStamp,
     };
@@ -234,8 +301,12 @@ export const AnnotationWidget = forwardRef<AnnotationController, AnnotationWidge
 
   const eraseAtEvent = (event: PointerEvent) => {
     const point = eventToPoint(event);
-    const scaleX = displaySizeRef.current.width / baseSizeRef.current.width;
-    const scaleY = displaySizeRef.current.height / baseSizeRef.current.height;
+    const scaleX = coordinateSpaceRef.current === "page"
+      ? 1
+      : displaySizeRef.current.width / baseSizeRef.current.width;
+    const scaleY = coordinateSpaceRef.current === "page"
+      ? 1
+      : displaySizeRef.current.height / baseSizeRef.current.height;
     const radius = sizes.eraser / Math.max(0.01, (scaleX + scaleY) / 2) / 2;
     const next = eraseStrokesAt(strokesRef.current, point, radius);
     if (next.length !== strokesRef.current.length) {
@@ -334,11 +405,37 @@ export const AnnotationWidget = forwardRef<AnnotationController, AnnotationWidge
     if (strokesRef.current.length) commit([]);
   }, [commit]);
 
+  const migrateToPageSpace = useCallback(() => {
+    if (coordinateSpaceRef.current === "page") return;
+    const rect = messageElement.getBoundingClientRect();
+    const origin = viewportOrigin(scrollContainerRef.current);
+    const scaleX = rect.width / Math.max(1, baseSizeRef.current.width);
+    const scaleY = rect.height / Math.max(1, baseSizeRef.current.height);
+    const widthScale = (scaleX + scaleY) / 2;
+    const migrated = strokesRef.current.map((stroke) => ({
+      ...stroke,
+      baseWidth: stroke.baseWidth * widthScale,
+      points: stroke.points.map((point) => ({
+        ...point,
+        x: origin.x + rect.left + point.x * scaleX,
+        y: origin.y + rect.top + point.y * scaleY,
+      })),
+    }));
+    coordinateSpaceRef.current = "page";
+    setCoordinateSpace("page");
+    baseSizeRef.current = pageSize(scrollContainerRef.current);
+    pastRef.current = [];
+    futureRef.current = [];
+    setVisibleStrokes(migrated, true);
+    setHistoryRevision((revision) => revision + 1);
+  }, [messageElement, setVisibleStrokes]);
+
   useImperativeHandle(
     ref,
     () => ({
       activate(nextTool = "pen") {
         if (streaming || loading || !identity) return;
+        migrateToPageSpace();
         setTool(nextTool);
         setEditing(true);
       },
@@ -356,7 +453,7 @@ export const AnnotationWidget = forwardRef<AnnotationController, AnnotationWidge
         setEditing(false);
       },
     }),
-    [clear, identity, loading, redo, streaming, undo],
+    [clear, identity, loading, migrateToPageSpace, redo, streaming, undo],
   );
 
   useEffect(() => {
@@ -380,7 +477,7 @@ export const AnnotationWidget = forwardRef<AnnotationController, AnnotationWidge
       : null;
 
   return (
-    <div className={`paintgpt-layer${editing ? " is-editing" : ""}`}>
+    <div className={`paintgpt-layer${editing ? " is-editing" : ""}${coordinateSpace === "page" ? " is-page-space" : ""}`}>
       <canvas
         ref={canvasRef}
         className="paintgpt-canvas"

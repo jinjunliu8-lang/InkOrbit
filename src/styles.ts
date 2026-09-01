@@ -7,8 +7,9 @@ export const widgetStyles = `
   *, *::before, *::after { box-sizing: border-box; }
   button { font: inherit; }
 
-  .paintgpt-layer { position: absolute; inset: 0; pointer-events: none; z-index: 20; }
-  .paintgpt-canvas { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+  .paintgpt-layer { position: fixed; inset: 0; pointer-events: none; z-index: 20; }
+  .paintgpt-canvas { position: fixed; pointer-events: none; }
+  .paintgpt-layer.is-page-space .paintgpt-canvas { inset: 0; width: 100vw; height: 100vh; }
   .paintgpt-layer.is-editing .paintgpt-canvas {
     pointer-events: auto;
     cursor: crosshair;

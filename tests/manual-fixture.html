@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>InkOrbit manual fixture</title>
+    <style>
+      body { margin: 0; font: 16px/1.7 system-ui, sans-serif; }
+      main { width: min(760px, calc(100% - 48px)); margin: 80px auto; }
+      section { min-height: 1500px; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <section data-turn="assistant" data-turn-id="fixture-answer">
+        <div data-message-author-role="assistant">
+          <h1>InkOrbit 页面画布测试</h1>
+          <p>点击悬浮球后，画布应覆盖整个视口，而不是只覆盖这段回答。</p>
+          <p style="margin-top: 1100px">滚动到这里后仍应可以继续批注。</p>
+        </div>
+      </section>
+    </main>
+    <script src="/dist/content.js"></script>
+  </body>
+</html>
