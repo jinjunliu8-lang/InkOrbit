@@ -1,6 +1,8 @@
-# 答案批注画板
+# InkOrbit（墨环）
 
-一个纯本地 Chromium 浏览器扩展，用数位笔、鼠标直接在 ChatGPT 的回答上圈画和批注。
+> Draw directly on AI answers.
+
+InkOrbit 是一个纯本地 Chromium 浏览器扩展，用数位笔或鼠标直接在 ChatGPT 的回答上圈画和批注。悬浮工具围绕主球展开，像一圈随手可用的“墨环”。
 
 ## 功能
 

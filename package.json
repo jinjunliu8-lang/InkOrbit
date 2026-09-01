@@ -1,7 +1,13 @@
 {
-  "name": "paintgpt-answer-annotator",
+  "name": "inkorbit",
   "private": true,
-  "version": "0.2.0",
+  "version": "0.2.1",
+  "description": "AssistiveTouch-style local annotation canvas for AI answers.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jinjunliu8-lang/InkOrbit.git"
+  },
   "type": "module",
   "scripts": {
     "build": "tsc --noEmit && vite build",

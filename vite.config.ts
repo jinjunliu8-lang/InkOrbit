@@ -15,7 +15,7 @@ export default defineConfig({
     lib: {
       entry: "src/content.tsx",
       formats: ["iife"],
-      name: "PaintGPTAnswerAnnotator",
+      name: "InkOrbit",
       fileName: () => "content.js",
     },
     rollupOptions: {

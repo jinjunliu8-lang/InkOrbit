@@ -102,7 +102,7 @@ export const AnnotationWidget = forwardRef<AnnotationController, AnnotationWidge
         setStorageError(false);
         setContentMismatch(false);
       } catch (error) {
-        console.warn("[答案批注画板] 保存批注失败", error);
+        console.warn("[InkOrbit] 保存批注失败", error);
         setStorageError(true);
       }
     },
@@ -159,7 +159,7 @@ export const AnnotationWidget = forwardRef<AnnotationController, AnnotationWidge
       })
       .catch((error) => {
         if (cancelled) return;
-        console.warn("[答案批注画板] 读取批注失败", error);
+        console.warn("[InkOrbit] 读取批注失败", error);
         const rect = messageElement.getBoundingClientRect();
         baseSizeRef.current = { width: Math.max(1, rect.width), height: Math.max(1, rect.height) };
         setVisibleStrokes([]);
