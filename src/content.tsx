@@ -1,6 +1,7 @@
 import { createRoot, type Root } from "react-dom/client";
 import { AnnotationWidget } from "./AnnotationWidget";
 import { FloatingController, type FloatingTarget } from "./FloatingController";
+import { PageDrawingSurface } from "./drawing-surface";
 import {
   createAnswerIdentity,
   findAssistantMessages,
@@ -25,8 +26,10 @@ declare global {
 // existing tab. Dispose a previous 0.3+ instance and remove legacy 0.2 hosts.
 window.__inkOrbitCleanup?.();
 document
-  .querySelectorAll('[data-paintgpt-floating-host="true"], [data-paintgpt-annotation-host="true"]')
+  .querySelectorAll('[data-paintgpt-floating-host="true"], [data-paintgpt-annotation-host="true"], [data-paintgpt-surface-host="true"]')
   .forEach((host) => host.remove());
+
+const drawingSurface = new PageDrawingSurface();
 
 interface MountedAnswer {
   key: string;
@@ -40,6 +43,8 @@ interface MountedAnswer {
   identity: AnswerIdentity | null;
   controller: AnnotationController | null;
   controllerState: AnnotationWidgetState;
+  renderedIdentity: AnswerIdentity | null;
+  renderedStreaming: boolean | null;
   setController(controller: AnnotationController | null): void;
   onStateChange(state: AnnotationWidgetState): void;
 }
@@ -83,7 +88,7 @@ function scheduleFloatingRender() {
 function ensureMounted(message: HTMLElement): MountedAnswer {
   const existing = mounted.get(message);
   if (existing) {
-    if (!existing.host.isConnected) document.documentElement.appendChild(existing.host);
+    if (!existing.host.isConnected) message.appendChild(existing.host);
     return existing;
   }
 
@@ -91,20 +96,14 @@ function ensureMounted(message: HTMLElement): MountedAnswer {
 
   const host = document.createElement("div");
   host.dataset.paintgptAnnotationHost = "true";
-  host.style.cssText = "position:fixed;inset:0;z-index:2147483645;pointer-events:none;";
-  const shadow = host.attachShadow({ mode: "open" });
-  const style = document.createElement("style");
-  style.textContent = widgetStyles;
-  const reactRoot = document.createElement("div");
-  reactRoot.style.cssText = "position:fixed;inset:0;pointer-events:none;";
-  shadow.append(style, reactRoot);
-  document.documentElement.appendChild(host);
+  host.style.cssText = "display:none;";
+  message.appendChild(host);
 
   let record: MountedAnswer;
   record = {
     key: `paintgpt-answer-${++answerSequence}`,
     host,
-    root: createRoot(reactRoot),
+    root: createRoot(host),
     originalPosition,
     lastText: "",
     lastChangedAt: Date.now(),
@@ -123,6 +122,8 @@ function ensureMounted(message: HTMLElement): MountedAnswer {
       ready: false,
       streaming: false,
     },
+    renderedIdentity: null,
+    renderedStreaming: null,
     setController(controller: AnnotationController | null) {
       if (record.controller === controller) return;
       record.controller = controller;
@@ -139,12 +140,17 @@ function ensureMounted(message: HTMLElement): MountedAnswer {
 }
 
 function renderRecord(message: HTMLElement, record: MountedAnswer, streaming: boolean) {
+  if (record.renderedIdentity === record.identity && record.renderedStreaming === streaming) return;
+  record.renderedIdentity = record.identity;
+  record.renderedStreaming = streaming;
   record.root.render(
     <AnnotationWidget
+      documentId={record.key}
       ref={record.setController}
       messageElement={message}
       identity={record.identity}
       streaming={streaming}
+      surface={drawingSurface}
       onStateChange={record.onStateChange}
     />,
   );
@@ -169,6 +175,7 @@ function scan() {
       record.identity = null;
       record.identityText = null;
       record.hashingText = null;
+      record.renderedIdentity = null;
     }
   }
 
@@ -227,10 +234,22 @@ observer.observe(document.documentElement, {
 
 const scanInterval = window.setInterval(scan, 1500);
 
+const flushControllers = () => {
+  for (const [, record] of mounted) record.controller?.flush();
+};
+const onVisibilityChange = () => {
+  if (document.visibilityState === "hidden") flushControllers();
+};
+document.addEventListener("visibilitychange", onVisibilityChange);
+window.addEventListener("pagehide", flushControllers);
+
 window.__inkOrbitCleanup = () => {
   observer.disconnect();
   if (scanTimer !== null) window.clearTimeout(scanTimer);
   window.clearInterval(scanInterval);
+  document.removeEventListener("visibilitychange", onVisibilityChange);
+  window.removeEventListener("pagehide", flushControllers);
+  flushControllers();
   for (const [message, record] of mounted) {
     record.root.unmount();
     record.host.remove();
@@ -239,6 +258,7 @@ window.__inkOrbitCleanup = () => {
   mounted.clear();
   floatingRoot.unmount();
   floatingHost.remove();
+  drawingSurface.destroy();
   delete window.__inkOrbitCleanup;
 };
 

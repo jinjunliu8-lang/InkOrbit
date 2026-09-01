@@ -7,29 +7,6 @@ export const widgetStyles = `
   *, *::before, *::after { box-sizing: border-box; }
   button { font: inherit; }
 
-  .paintgpt-layer { position: fixed; inset: 0; pointer-events: none; z-index: 20; }
-  .paintgpt-canvas { position: fixed; pointer-events: none; }
-  .paintgpt-layer.is-page-space .paintgpt-canvas { inset: 0; width: 100vw; height: 100vh; }
-  .paintgpt-layer.is-editing .paintgpt-canvas {
-    pointer-events: auto;
-    cursor: crosshair;
-    touch-action: pan-y;
-  }
-
-  .paintgpt-warning {
-    position: absolute;
-    right: 8px;
-    bottom: 8px;
-    max-width: calc(100% - 16px);
-    padding: 5px 9px;
-    border-radius: 8px;
-    background: rgba(255, 247, 214, .96);
-    color: #7a4b00;
-    box-shadow: 0 2px 10px rgba(0,0,0,.08);
-    font-size: 12px;
-    pointer-events: auto;
-  }
-
   .paintgpt-floating-root {
     position: fixed;
     inset: 0;

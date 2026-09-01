@@ -8,14 +8,17 @@
       body { margin: 0; font: 16px/1.7 system-ui, sans-serif; }
       main { width: min(760px, calc(100% - 48px)); margin: 80px auto; }
       section { min-height: 1500px; }
+      #simulate-pen { position: fixed; left: 16px; top: 16px; z-index: 2147483647; }
     </style>
   </head>
   <body>
+    <button id="simulate-pen" type="button">模拟数位笔：长按拖页后继续书写</button>
     <main>
       <section data-turn="assistant" data-turn-id="fixture-answer">
         <div data-message-author-role="assistant">
           <h1>InkOrbit 页面画布测试</h1>
           <p>点击悬浮球后，画布应覆盖整个视口，而不是只覆盖这段回答。</p>
+          <pre id="wide-code" style="overflow-x:auto;white-space:pre;width:420px"><code>const veryWideExample = "这是一段用于验证代码块横向拖动的超长内容".repeat(12);</code></pre>
           <p style="margin-top: 1100px">滚动到这里后仍应可以继续批注。</p>
         </div>
       </section>
@@ -25,7 +28,106 @@
           <p>这个回答用于确认空闲 Canvas 不会分配全屏位图。</p>
         </div>
       </section>
+      <div id="many-answers"></div>
     </main>
+    <script>
+      const manyAnswers = document.querySelector("#many-answers");
+      for (let index = 3; index <= 50; index += 1) {
+        const answer = document.createElement("section");
+        answer.dataset.turn = "assistant";
+        answer.dataset.turnId = `fixture-answer-${index}`;
+        answer.innerHTML = `<div data-message-author-role="assistant"><h2>回答 ${index}</h2><p>性能测试回答。</p></div>`;
+        manyAnswers.appendChild(answer);
+      }
+    </script>
     <script src="/dist/content.js"></script>
+    <script>
+      const simulateButton = document.querySelector("#simulate-pen");
+      const pointerEvent = (type, pointerId, x, y, pointerType = "pen", button = 0, buttons = 1) => new PointerEvent(type, {
+        bubbles: true,
+        cancelable: true,
+        pointerId,
+        pointerType,
+        button,
+        buttons,
+        clientX: x,
+        clientY: y,
+        pressure: buttons ? 0.55 : 0,
+      });
+      simulateButton.addEventListener("click", async () => {
+        const surfaceHost = document.querySelector('[data-paintgpt-surface-host="true"]');
+        const live = surfaceHost?.shadowRoot?.querySelector(".inkorbit-live");
+        if (!live) return;
+        live.setPointerCapture = () => {};
+        live.releasePointerCapture = () => {};
+        live.hasPointerCapture = () => false;
+        const startScroll = window.scrollY;
+
+        live.dispatchEvent(pointerEvent("pointerdown", 91, 700, 520));
+        await new Promise((resolve) => setTimeout(resolve, 220));
+        live.dispatchEvent(pointerEvent("pointermove", 91, 700, 330));
+        live.dispatchEvent(pointerEvent("pointerup", 91, 700, 330, "pen", 0, 0));
+        const afterPan = window.scrollY;
+
+        live.dispatchEvent(pointerEvent("pointerdown", 92, 360, 260));
+        live.dispatchEvent(pointerEvent("pointermove", 92, 450, 310));
+        live.dispatchEvent(pointerEvent("pointerup", 92, 450, 310, "pen", 0, 0));
+
+        const beforeTouch = window.scrollY;
+        live.dispatchEvent(pointerEvent("pointerdown", 93, 700, 500, "touch"));
+        live.dispatchEvent(pointerEvent("pointermove", 93, 700, 410, "touch"));
+        live.dispatchEvent(pointerEvent("pointerup", 93, 700, 410, "touch", 0, 0));
+        const afterTouch = window.scrollY;
+
+        const beforeMiddle = window.scrollY;
+        live.dispatchEvent(pointerEvent("pointerdown", 94, 700, 500, "mouse", 1, 4));
+        live.dispatchEvent(pointerEvent("pointermove", 94, 700, 420, "mouse", 1, 4));
+        live.dispatchEvent(pointerEvent("pointerup", 94, 700, 420, "mouse", 1, 0));
+        const afterMiddle = window.scrollY;
+
+        const beforeSideButton = window.scrollY;
+        live.dispatchEvent(pointerEvent("pointerdown", 96, 700, 500, "pen", 2, 2));
+        live.dispatchEvent(pointerEvent("pointermove", 96, 700, 425, "pen", 2, 2));
+        live.dispatchEvent(pointerEvent("pointerup", 96, 700, 425, "pen", 2, 0));
+        const afterSideButton = window.scrollY;
+
+        const beforeSpace = window.scrollY;
+        document.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, cancelable: true, code: "Space" }));
+        live.dispatchEvent(pointerEvent("pointerdown", 95, 700, 500, "mouse"));
+        live.dispatchEvent(pointerEvent("pointermove", 95, 700, 430, "mouse"));
+        live.dispatchEvent(pointerEvent("pointerup", 95, 700, 430, "mouse", 0, 0));
+        document.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true, code: "Space" }));
+        const afterSpace = window.scrollY;
+
+        window.scrollTo(0, 0);
+        const wideCode = document.querySelector("#wide-code");
+        const codeRect = wideCode.getBoundingClientRect();
+        const codeX = codeRect.left + codeRect.width / 2;
+        const codeY = codeRect.top + codeRect.height / 2;
+        const beforeCodeX = wideCode.scrollLeft;
+        live.dispatchEvent(pointerEvent("pointerdown", 97, codeX, codeY, "touch"));
+        live.dispatchEvent(pointerEvent("pointermove", 97, codeX - 120, codeY, "touch"));
+        live.dispatchEvent(pointerEvent("pointerup", 97, codeX - 120, codeY, "touch", 0, 0));
+        const afterCodeX = wideCode.scrollLeft;
+
+        await new Promise((resolve) => setTimeout(resolve, 180));
+        const root = surfaceHost.shadowRoot.querySelector(".inkorbit-surface");
+        simulateButton.dataset.result = JSON.stringify({
+          startScroll,
+          afterPan,
+          beforeTouch,
+          afterTouch,
+          beforeMiddle,
+          afterMiddle,
+          beforeSideButton,
+          afterSideButton,
+          beforeSpace,
+          afterSpace,
+          beforeCodeX,
+          afterCodeX,
+          editing: root.classList.contains("is-editing"),
+        });
+      });
+    </script>
   </body>
 </html>

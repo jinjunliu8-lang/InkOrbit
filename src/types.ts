@@ -75,4 +75,5 @@ export interface AnnotationController {
   redo(): void;
   clear(): void;
   finish(): void;
+  flush(): void;
 }

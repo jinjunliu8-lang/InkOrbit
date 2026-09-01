@@ -5,413 +5,211 @@ import {
   useImperativeHandle,
   useRef,
   useState,
-  type PointerEvent as ReactPointerEvent,
 } from "react";
-import { eraseStrokesAt } from "./geometry";
-import { renderPageStrokeSegments, renderPageStrokes, renderStrokes } from "./renderer";
+import type { DrawingSurfaceSession, PageDrawingSurface } from "./drawing-surface";
 import { loadAnnotation, saveAnnotation } from "./storage";
 import type {
   ActiveTool,
   AnnotationController,
+  AnnotationDocument,
   AnnotationWidgetState,
   AnswerIdentity,
   CanvasSize,
-  DrawingTool,
   Stroke,
-  StrokePoint,
+  ToolSizes,
 } from "./types";
 
 interface AnnotationWidgetProps {
+  documentId: string;
   messageElement: HTMLElement;
   identity: AnswerIdentity | null;
   streaming: boolean;
+  surface: PageDrawingSurface;
   onStateChange(state: AnnotationWidgetState): void;
 }
 
-const PEN_COLORS = ["#1f2937", "#dc2626", "#2563eb"];
-type CoordinateSpace = "answer" | "page";
+const DEFAULT_PEN_COLOR = "#1f2937";
+const DEFAULT_SIZES: ToolSizes = { pen: 3, highlighter: 18, eraser: 24 };
 
 function findScrollContainer(element: HTMLElement): HTMLElement | null {
   for (let parent = element.parentElement; parent; parent = parent.parentElement) {
     const style = getComputedStyle(parent);
-    if (/(auto|scroll|overlay)/.test(style.overflowY) && parent.scrollHeight > parent.clientHeight) {
-      return parent;
-    }
+    if (/(auto|scroll|overlay)/.test(style.overflowY) && parent.scrollHeight > parent.clientHeight) return parent;
   }
   return null;
 }
 
-function viewportOrigin(scroller: HTMLElement | null) {
+function viewportOrigin(element: HTMLElement) {
+  const scroller = findScrollContainer(element);
   return {
     x: window.scrollX + (scroller?.scrollLeft ?? 0),
     y: window.scrollY + (scroller?.scrollTop ?? 0),
   };
 }
 
-function pageSize(scroller: HTMLElement | null): CanvasSize {
-  const root = document.documentElement;
+function pageSize(element: HTMLElement): CanvasSize {
+  const scroller = findScrollContainer(element);
   return {
-    width: Math.max(window.innerWidth, root.scrollWidth, scroller?.scrollWidth ?? 0),
-    height: Math.max(window.innerHeight, root.scrollHeight, scroller?.scrollHeight ?? 0),
+    width: Math.max(innerWidth, document.documentElement.scrollWidth, scroller?.scrollWidth ?? 0),
+    height: Math.max(innerHeight, document.documentElement.scrollHeight, scroller?.scrollHeight ?? 0),
   };
 }
 
-function makeStrokeId() {
-  return globalThis.crypto?.randomUUID?.() ?? `stroke-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+function migrateAnswerStrokes(documentRecord: AnnotationDocument, element: HTMLElement): Stroke[] {
+  if (documentRecord.coordinateSpace === "page") return documentRecord.strokes;
+  const rect = element.getBoundingClientRect();
+  const origin = viewportOrigin(element);
+  const scaleX = rect.width / Math.max(1, documentRecord.canvas.width);
+  const scaleY = rect.height / Math.max(1, documentRecord.canvas.height);
+  const widthScale = (scaleX + scaleY) / 2;
+  return documentRecord.strokes.map((stroke) => ({
+    ...stroke,
+    baseWidth: stroke.baseWidth * widthScale,
+    points: stroke.points.map((point) => ({
+      ...point,
+      x: origin.x + rect.left + point.x * scaleX,
+      y: origin.y + rect.top + point.y * scaleY,
+    })),
+  }));
 }
 
+export const annotationWidgetTestHelpers = { migrateAnswerStrokes };
+
 export const AnnotationWidget = forwardRef<AnnotationController, AnnotationWidgetProps>(function AnnotationWidget({
+  documentId,
   messageElement,
   identity,
   streaming,
+  surface,
   onStateChange,
 }, ref) {
-  const canvasRef = useRef<HTMLCanvasElement>(null);
   const strokesRef = useRef<Stroke[]>([]);
-  const currentStrokeRef = useRef<Stroke | null>(null);
-  const baseSizeRef = useRef<CanvasSize>({ width: 0, height: 0 });
-  const displaySizeRef = useRef<CanvasSize>({ width: 0, height: 0 });
+  const toolRef = useRef<ActiveTool>("pen");
+  const penColorRef = useRef(DEFAULT_PEN_COLOR);
+  const sizesRef = useRef<ToolSizes>(DEFAULT_SIZES);
+  const identityRef = useRef<AnswerIdentity | null>(identity);
+  const pendingDocumentRef = useRef<AnnotationDocument | null>(null);
+  const idleHandleRef = useRef<number | null>(null);
+  const idleHandleKindRef = useRef<"idle" | "timeout" | null>(null);
+  const saveChainRef = useRef<Promise<void>>(Promise.resolve());
   const pastRef = useRef<Stroke[][]>([]);
   const futureRef = useRef<Stroke[][]>([]);
-  const activePointerRef = useRef<number | null>(null);
-  const eraseBeforeRef = useRef<Stroke[] | null>(null);
-  const eraseChangedRef = useRef(false);
-  const frameRef = useRef<number | null>(null);
-  const coordinateSpaceRef = useRef<CoordinateSpace>("page");
-  const scrollContainerRef = useRef<HTMLElement | null>(null);
-  const pixelRatioRef = useRef(1);
+  const commitRef = useRef<(next: Stroke[]) => void>(() => undefined);
 
   const [strokes, setStrokes] = useState<Stroke[]>([]);
   const [editing, setEditing] = useState(false);
-  const [tool, setTool] = useState<ActiveTool>("pen");
-  const [penColor, setPenColor] = useState(PEN_COLORS[0]);
-  const [sizes, setSizes] = useState({ pen: 3, highlighter: 18, eraser: 24 });
+  const [tool, setToolState] = useState<ActiveTool>("pen");
+  const [penColor, setPenColorState] = useState(DEFAULT_PEN_COLOR);
+  const [sizes, setSizesState] = useState<ToolSizes>(DEFAULT_SIZES);
   const [loading, setLoading] = useState(true);
-  const [contentMismatch, setContentMismatch] = useState(false);
-  const [layoutMismatch, setLayoutMismatch] = useState(false);
-  const [storageError, setStorageError] = useState(false);
   const [historyRevision, setHistoryRevision] = useState(0);
-  const [coordinateSpace, setCoordinateSpace] = useState<CoordinateSpace>("page");
 
-  const drawNow = useCallback(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const context = canvas.getContext("2d");
-    if (!context) return;
-    const visibleStrokes = currentStrokeRef.current
-      ? [...strokesRef.current, currentStrokeRef.current]
-      : strokesRef.current;
-    const ratio = pixelRatioRef.current;
-    if (coordinateSpaceRef.current === "page") {
-      renderPageStrokes(
-        context,
-        visibleStrokes,
-        displaySizeRef.current,
-        viewportOrigin(scrollContainerRef.current),
-        ratio,
-      );
+  identityRef.current = identity;
+
+  const cancelScheduledSave = useCallback(() => {
+    if (idleHandleRef.current === null) return;
+    if (idleHandleKindRef.current === "idle") window.cancelIdleCallback(idleHandleRef.current);
+    else window.clearTimeout(idleHandleRef.current);
+    idleHandleRef.current = null;
+    idleHandleKindRef.current = null;
+  }, []);
+
+  const flushPersist = useCallback(() => {
+    cancelScheduledSave();
+    const documentRecord = pendingDocumentRef.current;
+    if (!documentRecord) return;
+    pendingDocumentRef.current = null;
+    saveChainRef.current = saveChainRef.current
+      .catch(() => undefined)
+      .then(() => saveAnnotation(documentRecord))
+      .catch((error) => console.warn("[InkOrbit] 保存批注失败", error));
+  }, [cancelScheduledSave]);
+
+  const schedulePersist = useCallback((nextStrokes: Stroke[]) => {
+    const currentIdentity = identityRef.current;
+    if (!currentIdentity) return;
+    pendingDocumentRef.current = {
+      version: 1,
+      ...currentIdentity,
+      canvas: pageSize(messageElement),
+      coordinateSpace: "page",
+      strokes: nextStrokes,
+      updatedAt: Date.now(),
+    };
+    if (idleHandleRef.current !== null) return;
+    if (typeof window.requestIdleCallback === "function") {
+      idleHandleKindRef.current = "idle";
+      idleHandleRef.current = window.requestIdleCallback(() => flushPersist(), { timeout: 900 });
     } else {
-      renderStrokes(context, visibleStrokes, baseSizeRef.current, displaySizeRef.current, ratio);
+      idleHandleKindRef.current = "timeout";
+      idleHandleRef.current = window.setTimeout(() => flushPersist(), 350);
     }
-  }, [messageElement]);
+  }, [flushPersist, messageElement]);
 
-  const scheduleDraw = useCallback(() => {
-    if (frameRef.current !== null) return;
-    frameRef.current = requestAnimationFrame(() => {
-      frameRef.current = null;
-      drawNow();
-    });
-  }, [drawNow]);
+  const setVisibleStrokes = useCallback((next: Stroke[], persist = false) => {
+    strokesRef.current = next;
+    setStrokes(next);
+    surface.refresh(documentId);
+    if (persist) schedulePersist(next);
+  }, [documentId, schedulePersist, surface]);
 
-  const drawCurrentStrokeIncrementally = useCallback(
-    (fromPointIndex: number) => {
-      const canvas = canvasRef.current;
-      const stroke = currentStrokeRef.current;
-      if (!canvas || !stroke || coordinateSpaceRef.current !== "page") {
-        scheduleDraw();
-        return;
-      }
-      const context = canvas.getContext("2d");
-      if (!context) return;
-      renderPageStrokeSegments(
-        context,
-        stroke,
-        fromPointIndex,
-        viewportOrigin(scrollContainerRef.current),
-        pixelRatioRef.current,
-      );
-    },
-    [scheduleDraw],
-  );
+  const commit = useCallback((next: Stroke[]) => {
+    if (next === strokesRef.current) return;
+    pastRef.current.push(strokesRef.current);
+    futureRef.current = [];
+    setVisibleStrokes(next, true);
+    setHistoryRevision((revision) => revision + 1);
+  }, [setVisibleStrokes]);
+  commitRef.current = commit;
 
-  const persist = useCallback(
-    async (nextStrokes: Stroke[]) => {
-      if (!identity || baseSizeRef.current.width <= 0 || baseSizeRef.current.height <= 0) return;
-      try {
-        await saveAnnotation({
-          version: 1,
-          ...identity,
-          canvas: baseSizeRef.current,
-          coordinateSpace: coordinateSpaceRef.current,
-          strokes: nextStrokes,
-          updatedAt: Date.now(),
-        });
-        setStorageError(false);
-        setContentMismatch(false);
-      } catch (error) {
-        console.warn("[InkOrbit] 保存批注失败", error);
-        setStorageError(true);
-      }
-    },
-    [identity],
-  );
-
-  const setVisibleStrokes = useCallback(
-    (nextStrokes: Stroke[], shouldPersist = false) => {
-      strokesRef.current = nextStrokes;
-      setStrokes(nextStrokes);
-      scheduleDraw();
-      if (shouldPersist) void persist(nextStrokes);
-    },
-    [persist, scheduleDraw],
-  );
-
-  const commit = useCallback(
-    (nextStrokes: Stroke[]) => {
-      if (nextStrokes === strokesRef.current) return;
-      pastRef.current.push(strokesRef.current);
-      futureRef.current = [];
-      setVisibleStrokes(nextStrokes, true);
-      setHistoryRevision((revision) => revision + 1);
-    },
-    [setVisibleStrokes],
-  );
+  useEffect(() => {
+    const session: DrawingSurfaceSession = {
+      element: messageElement,
+      getSnapshot: () => ({
+        strokes: strokesRef.current,
+        tool: toolRef.current,
+        penColor: penColorRef.current,
+        sizes: sizesRef.current,
+      }),
+      commit: (next) => commitRef.current(next),
+    };
+    return surface.register(documentId, session);
+  }, [documentId, messageElement, surface]);
 
   useEffect(() => {
     let cancelled = false;
-    scrollContainerRef.current = findScrollContainer(messageElement);
     setLoading(true);
     setEditing(false);
+    surface.deactivate(documentId);
     pastRef.current = [];
     futureRef.current = [];
     setHistoryRevision((revision) => revision + 1);
 
     if (!identity) {
-      coordinateSpaceRef.current = "page";
-      setCoordinateSpace("page");
       setVisibleStrokes([]);
       setLoading(false);
-      return () => {
-        cancelled = true;
-      };
+      return () => { cancelled = true; };
     }
 
     void loadAnnotation(identity)
       .then((loaded) => {
         if (cancelled) return;
-        const loadedSpace: CoordinateSpace = loaded.document
-          ? loaded.document.coordinateSpace ?? "answer"
-          : "page";
-        coordinateSpaceRef.current = loadedSpace;
-        setCoordinateSpace(loadedSpace);
-        baseSizeRef.current = loaded.document?.canvas ?? pageSize(scrollContainerRef.current);
-        setVisibleStrokes(loaded.document?.strokes ?? []);
-        setContentMismatch(loaded.contentMismatch);
-        setStorageError(false);
+        const loadedStrokes = loaded.document ? migrateAnswerStrokes(loaded.document, messageElement) : [];
+        setVisibleStrokes(loadedStrokes);
+        if (loaded.document && loaded.document.coordinateSpace !== "page") schedulePersist(loadedStrokes);
       })
       .catch((error) => {
-        if (cancelled) return;
-        console.warn("[InkOrbit] 读取批注失败", error);
-        coordinateSpaceRef.current = "page";
-        setCoordinateSpace("page");
-        baseSizeRef.current = pageSize(scrollContainerRef.current);
-        setVisibleStrokes([]);
-        setStorageError(true);
+        if (!cancelled) {
+          console.warn("[InkOrbit] 读取批注失败", error);
+          setVisibleStrokes([]);
+        }
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
       });
 
-    return () => {
-      cancelled = true;
-    };
-  }, [identity?.conversationId, identity?.messageId, identity?.contentHash]);
-
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-
-    const resize = () => {
-      scrollContainerRef.current = findScrollContainer(messageElement);
-      const isPage = coordinateSpaceRef.current === "page";
-      const rect = isPage
-        ? { left: 0, top: 0, width: window.innerWidth, height: window.innerHeight }
-        : messageElement.getBoundingClientRect();
-      canvas.style.left = `${rect.left}px`;
-      canvas.style.top = `${rect.top}px`;
-      canvas.style.width = `${Math.max(1, rect.width)}px`;
-      canvas.style.height = `${Math.max(1, rect.height)}px`;
-      const displaySize = {
-        width: Math.max(1, rect.width),
-        height: Math.max(1, rect.height),
-      };
-      displaySizeRef.current = displaySize;
-      if (baseSizeRef.current.width <= 0 || baseSizeRef.current.height <= 0) {
-        baseSizeRef.current = displaySize;
-      }
-      const deviceRatio = Math.max(1, window.devicePixelRatio || 1);
-      // During writing, 1.5x is visually crisp but substantially cheaper than
-      // a full 2x/3x viewport bitmap. Finished ink is redrawn up to 2x.
-      const ratio = Math.min(editing ? 1.5 : 2, deviceRatio);
-      pixelRatioRef.current = ratio;
-      const needsBitmap = editing || strokesRef.current.length > 0 || currentStrokeRef.current !== null;
-      const pixelWidth = needsBitmap ? Math.max(1, Math.round(displaySize.width * ratio)) : 1;
-      const pixelHeight = needsBitmap ? Math.max(1, Math.round(displaySize.height * ratio)) : 1;
-      if (canvas.width !== pixelWidth) canvas.width = pixelWidth;
-      if (canvas.height !== pixelHeight) canvas.height = pixelHeight;
-
-      const currentPageSize = pageSize(scrollContainerRef.current);
-      const baseAspect = baseSizeRef.current.width / baseSizeRef.current.height;
-      const displayAspect = displaySize.width / displaySize.height;
-      const mismatch = strokesRef.current.length > 0 && (isPage
-        ? Math.abs(currentPageSize.width - baseSizeRef.current.width) / baseSizeRef.current.width > 0.08
-        : Math.abs(displayAspect - baseAspect) / baseAspect > 0.06);
-      setLayoutMismatch(mismatch);
-      scheduleDraw();
-    };
-
-    const observer = new ResizeObserver(resize);
-    observer.observe(messageElement);
-    observer.observe(document.documentElement);
-    window.addEventListener("resize", resize);
-    document.addEventListener("scroll", scheduleDraw, true);
-    resize();
-    return () => {
-      observer.disconnect();
-      window.removeEventListener("resize", resize);
-      document.removeEventListener("scroll", scheduleDraw, true);
-    };
-  }, [coordinateSpace, editing, messageElement, scheduleDraw, strokes.length]);
-
-  useEffect(() => {
-    strokesRef.current = strokes;
-    scheduleDraw();
-  }, [strokes, scheduleDraw]);
-
-  useEffect(
-    () => () => {
-      if (frameRef.current !== null) cancelAnimationFrame(frameRef.current);
-    },
-    [],
-  );
-
-  const eventToPoint = (event: PointerEvent): StrokePoint => {
-    const rect = canvasRef.current!.getBoundingClientRect();
-    const base = baseSizeRef.current;
-    const pressure = event.pointerType === "mouse" ? 0.5 : event.pressure > 0 ? event.pressure : 0.5;
-    const origin = viewportOrigin(scrollContainerRef.current);
-    const point = coordinateSpaceRef.current === "page"
-      ? {
-          x: event.clientX + origin.x,
-          y: event.clientY + origin.y,
-        }
-      : {
-          x: ((event.clientX - rect.left) / Math.max(1, rect.width)) * base.width,
-          y: ((event.clientY - rect.top) / Math.max(1, rect.height)) * base.height,
-        };
-    return {
-      ...point,
-      pressure,
-      time: event.timeStamp,
-    };
-  };
-
-  const eraseAtEvent = (event: PointerEvent) => {
-    const point = eventToPoint(event);
-    const scaleX = coordinateSpaceRef.current === "page"
-      ? 1
-      : displaySizeRef.current.width / baseSizeRef.current.width;
-    const scaleY = coordinateSpaceRef.current === "page"
-      ? 1
-      : displaySizeRef.current.height / baseSizeRef.current.height;
-    const radius = sizes.eraser / Math.max(0.01, (scaleX + scaleY) / 2) / 2;
-    const next = eraseStrokesAt(strokesRef.current, point, radius);
-    if (next.length !== strokesRef.current.length) {
-      eraseChangedRef.current = true;
-      setVisibleStrokes(next);
-    }
-  };
-
-  const handlePointerDown = (event: ReactPointerEvent<HTMLCanvasElement>) => {
-    if (!editing || event.pointerType === "touch" || activePointerRef.current !== null) return;
-    if (event.button !== 0 && event.pointerType !== "pen") return;
-    event.preventDefault();
-    event.currentTarget.setPointerCapture(event.pointerId);
-    activePointerRef.current = event.pointerId;
-
-    const useEraser = tool === "eraser" || (event.pointerType === "pen" && event.button === 5);
-    if (useEraser) {
-      eraseBeforeRef.current = strokesRef.current;
-      eraseChangedRef.current = false;
-      eraseAtEvent(event.nativeEvent);
-      return;
-    }
-
-    const drawingTool = tool as DrawingTool;
-    currentStrokeRef.current = {
-      id: makeStrokeId(),
-      tool: drawingTool,
-      color: drawingTool === "highlighter" ? "#facc15" : penColor,
-      baseWidth: sizes[drawingTool],
-      opacity: drawingTool === "highlighter" ? 0.3 : 1,
-      points: [eventToPoint(event.nativeEvent)],
-    };
-    drawCurrentStrokeIncrementally(0);
-  };
-
-  const handlePointerMove = (event: ReactPointerEvent<HTMLCanvasElement>) => {
-    if (activePointerRef.current !== event.pointerId) return;
-    event.preventDefault();
-    const nativeEvents = event.nativeEvent.getCoalescedEvents?.() ?? [event.nativeEvent];
-    if (currentStrokeRef.current) {
-      const fromPointIndex = currentStrokeRef.current.points.length;
-      for (const nativeEvent of nativeEvents) {
-        const point = eventToPoint(nativeEvent);
-        const previous = currentStrokeRef.current.points.at(-1);
-        if (!previous || previous.x !== point.x || previous.y !== point.y) {
-          currentStrokeRef.current.points.push(point);
-        }
-      }
-      drawCurrentStrokeIncrementally(fromPointIndex);
-      return;
-    }
-    for (const nativeEvent of nativeEvents) eraseAtEvent(nativeEvent);
-  };
-
-  const finishPointer = (event: ReactPointerEvent<HTMLCanvasElement>) => {
-    if (activePointerRef.current !== event.pointerId) return;
-    activePointerRef.current = null;
-    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
-      event.currentTarget.releasePointerCapture(event.pointerId);
-    }
-
-    if (currentStrokeRef.current) {
-      const completed = currentStrokeRef.current;
-      currentStrokeRef.current = null;
-      commit([...strokesRef.current, completed]);
-      return;
-    }
-
-    if (eraseChangedRef.current && eraseBeforeRef.current) {
-      pastRef.current.push(eraseBeforeRef.current);
-      futureRef.current = [];
-      void persist(strokesRef.current);
-      setHistoryRevision((revision) => revision + 1);
-    }
-    eraseBeforeRef.current = null;
-    eraseChangedRef.current = false;
-    scheduleDraw();
-  };
+    return () => { cancelled = true; };
+  }, [documentId, identity?.conversationId, identity?.messageId, identity?.contentHash]);
 
   const undo = useCallback(() => {
     const previous = pastRef.current.pop();
@@ -430,59 +228,43 @@ export const AnnotationWidget = forwardRef<AnnotationController, AnnotationWidge
   }, [setVisibleStrokes]);
 
   const clear = useCallback(() => {
-    if (strokesRef.current.length) commit([]);
+    if (strokesRef.current.length > 0) commit([]);
   }, [commit]);
 
-  const migrateToPageSpace = useCallback(() => {
-    if (coordinateSpaceRef.current === "page") return;
-    const rect = messageElement.getBoundingClientRect();
-    const origin = viewportOrigin(scrollContainerRef.current);
-    const scaleX = rect.width / Math.max(1, baseSizeRef.current.width);
-    const scaleY = rect.height / Math.max(1, baseSizeRef.current.height);
-    const widthScale = (scaleX + scaleY) / 2;
-    const migrated = strokesRef.current.map((stroke) => ({
-      ...stroke,
-      baseWidth: stroke.baseWidth * widthScale,
-      points: stroke.points.map((point) => ({
-        ...point,
-        x: origin.x + rect.left + point.x * scaleX,
-        y: origin.y + rect.top + point.y * scaleY,
-      })),
-    }));
-    coordinateSpaceRef.current = "page";
-    setCoordinateSpace("page");
-    baseSizeRef.current = pageSize(scrollContainerRef.current);
-    pastRef.current = [];
-    futureRef.current = [];
-    setVisibleStrokes(migrated, true);
-    setHistoryRevision((revision) => revision + 1);
-  }, [messageElement, setVisibleStrokes]);
-
-  useImperativeHandle(
-    ref,
-    () => ({
-      activate(nextTool = "pen") {
-        if (streaming || loading || !identity) return;
-        migrateToPageSpace();
-        setTool(nextTool);
-        setEditing(true);
-      },
-      setTool(nextTool, settings) {
-        setTool(nextTool);
-        if (settings?.color && nextTool === "pen") setPenColor(settings.color);
-        if (settings?.size !== undefined) {
-          setSizes((current) => ({ ...current, [nextTool]: settings.size! }));
-        }
-      },
-      undo,
-      redo,
-      clear,
-      finish() {
-        setEditing(false);
-      },
-    }),
-    [clear, identity, loading, migrateToPageSpace, redo, streaming, undo],
-  );
+  useImperativeHandle(ref, () => ({
+    activate(nextTool = "pen") {
+      if (streaming || loading || !identityRef.current) return;
+      toolRef.current = nextTool;
+      setToolState(nextTool);
+      setEditing(true);
+      surface.activate(documentId);
+    },
+    setTool(nextTool, settings) {
+      toolRef.current = nextTool;
+      setToolState(nextTool);
+      if (settings?.color && nextTool === "pen") {
+        penColorRef.current = settings.color;
+        setPenColorState(settings.color);
+      }
+      if (settings?.size !== undefined) {
+        const nextSizes = { ...sizesRef.current, [nextTool]: settings.size };
+        sizesRef.current = nextSizes;
+        setSizesState(nextSizes);
+      }
+      surface.refresh(documentId);
+    },
+    undo,
+    redo,
+    clear,
+    finish() {
+      setEditing(false);
+      surface.deactivate(documentId);
+      flushPersist();
+    },
+    flush() {
+      flushPersist();
+    },
+  }), [clear, documentId, flushPersist, loading, redo, streaming, surface, undo]);
 
   useEffect(() => {
     onStateChange({
@@ -498,25 +280,7 @@ export const AnnotationWidget = forwardRef<AnnotationController, AnnotationWidge
     });
   }, [editing, historyRevision, identity, loading, onStateChange, penColor, sizes, streaming, strokes.length, tool]);
 
-  const warning = storageError
-    ? "本地保存失败，请检查浏览器存储权限"
-    : contentMismatch || layoutMismatch
-      ? "答案或排版发生变化，旧批注可能轻微错位"
-      : null;
+  useEffect(() => () => flushPersist(), [flushPersist]);
 
-  return (
-    <div className={`paintgpt-layer${editing ? " is-editing" : ""}${coordinateSpace === "page" ? " is-page-space" : ""}`}>
-      <canvas
-        ref={canvasRef}
-        className="paintgpt-canvas"
-        aria-label="答案批注画布"
-        onPointerDown={handlePointerDown}
-        onPointerMove={handlePointerMove}
-        onPointerUp={finishPointer}
-        onPointerCancel={finishPointer}
-      />
-
-      {warning && <div className="paintgpt-warning">{warning}</div>}
-    </div>
-  );
+  return null;
 });
