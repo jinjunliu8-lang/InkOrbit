@@ -54,10 +54,10 @@ interface Gesture {
   stroke: Stroke | null;
   renderedPointCount: number;
   originalStrokes: Stroke[] | null;
-  workingStrokes: Stroke[] | null;
   erasedIds: Set<string>;
   scrollTargets: ScrollTargets | null;
   ratio: number;
+  scroller: HTMLElement | null;
 }
 
 function makeStrokeId() {
@@ -118,6 +118,25 @@ function pointFromEvent(event: PointerEvent, scroller: HTMLElement | null): Stro
   };
 }
 
+function eventSamples(event: PointerEvent): PointerEvent[] {
+  const coalesced = event.getCoalescedEvents?.();
+  return coalesced && coalesced.length > 0 ? coalesced : [event];
+}
+
+function appendStrokeSamples(stroke: Stroke, samples: readonly PointerEvent[], scroller: HTMLElement | null) {
+  const origin = viewportOrigin(scroller);
+  for (const sample of samples) {
+    const point: StrokePoint = {
+      x: sample.clientX + origin.x,
+      y: sample.clientY + origin.y,
+      pressure: sample.pointerType === "mouse" ? 0.5 : sample.pressure > 0 ? sample.pressure : 0.5,
+      time: sample.timeStamp,
+    };
+    const previous = stroke.points.at(-1);
+    if (!previous || previous.x !== point.x || previous.y !== point.y) stroke.points.push(point);
+  }
+}
+
 function movement(startX: number, startY: number, x: number, y: number) {
   return Math.hypot(x - startX, y - startY);
 }
@@ -171,6 +190,8 @@ export class PageDrawingSurface {
   private spaceDown = false;
   private interactiveRatioIndex = 2;
   private averageFrameMs = 0;
+  private committedRevision = 0;
+  private drawnCommittedRevision = -1;
 
   constructor() {
     this.host.dataset.paintgptSurfaceHost = "true";
@@ -302,7 +323,7 @@ export class PageDrawingSurface {
   private ensureIndex(registered: RegisteredSession, strokes = registered.session.getSnapshot().strokes) {
     if (registered.source !== strokes) {
       registered.source = strokes;
-      registered.index.rebuild(strokes);
+      registered.index.sync(strokes);
     }
     return registered;
   }
@@ -335,6 +356,7 @@ export class PageDrawingSurface {
       this.committed.width = 1;
       this.committed.height = 1;
       this.committed.dataset.ratio = "1";
+      this.drawnCommittedRevision = this.committedRevision;
       return;
     }
     this.resizeCanvas(this.committed, ratio);
@@ -349,16 +371,21 @@ export class PageDrawingSurface {
         viewport = { origin: viewportOrigin(scroller), bounds: this.visibleBounds(scroller) };
         viewportCache.set(scroller, viewport);
       }
-      const isWorkingErase = id === this.activeId && this.gesture?.mode === "erasing" && this.gesture.workingStrokes;
-      const indexed = isWorkingErase ? registered : this.ensureIndex(registered, strokes);
+      const erasedIds = id === this.activeId && this.gesture?.mode === "erasing"
+        ? this.gesture.erasedIds
+        : null;
+      const indexed = this.ensureIndex(registered, strokes);
       for (const stroke of indexed.index.query(viewport.bounds)) {
+        if (erasedIds?.has(stroke.id)) continue;
         renderPageStrokeSegments(context, stroke, 0, viewport.origin, ratio);
       }
     }
+    this.drawnCommittedRevision = this.committedRevision;
     this.recordFrame(performance.now() - started);
   };
 
   private scheduleCommittedDraw() {
+    this.committedRevision += 1;
     if (this.committedFrame !== null) return;
     this.committedFrame = requestAnimationFrame(() => {
       this.committedFrame = null;
@@ -370,6 +397,10 @@ export class PageDrawingSurface {
     if (this.idleQualityTimer !== null) window.clearTimeout(this.idleQualityTimer);
     this.idleQualityTimer = window.setTimeout(() => {
       this.idleQualityTimer = null;
+      if (
+        this.drawnCommittedRevision === this.committedRevision &&
+        this.canvasRatio(this.committed) === this.highQualityRatio()
+      ) return;
       this.drawCommitted(this.highQualityRatio());
     }, HIGH_QUALITY_IDLE_MS);
   }
@@ -381,7 +412,7 @@ export class PageDrawingSurface {
     else if (this.averageFrameMs < 5 && this.interactiveRatioIndex < INTERACTIVE_RATIOS.length - 1) this.interactiveRatioIndex += 1;
   }
 
-  private createStroke(event: PointerEvent, session: DrawingSurfaceSession) {
+  private createStroke(event: PointerEvent, session: DrawingSurfaceSession, scroller: HTMLElement | null) {
     const snapshot = session.getSnapshot();
     const drawingTool = snapshot.tool === "highlighter" ? "highlighter" : "pen";
     return {
@@ -390,7 +421,7 @@ export class PageDrawingSurface {
       color: drawingTool === "highlighter" ? "#facc15" : snapshot.penColor,
       baseWidth: snapshot.sizes[drawingTool],
       opacity: drawingTool === "highlighter" ? 0.3 : 1,
-      points: [pointFromEvent(event, findPrimaryScroller(session.element))],
+      points: [pointFromEvent(event, scroller)],
     } satisfies Stroke;
   }
 
@@ -473,7 +504,7 @@ export class PageDrawingSurface {
         context,
         gesture.stroke,
         gesture.renderedPointCount,
-        viewportOrigin(findPrimaryScroller(session.element)),
+        viewportOrigin(gesture.scroller),
         gesture.ratio,
       );
       gesture.renderedPointCount = gesture.stroke.points.length;
@@ -481,33 +512,35 @@ export class PageDrawingSurface {
     });
   }
 
-  private eraseAt(event: PointerEvent, gesture: Gesture, session: DrawingSurfaceSession) {
+  private eraseSamples(events: readonly PointerEvent[], gesture: Gesture, session: DrawingSurfaceSession) {
     const snapshot = session.getSnapshot();
-    const point = pointFromEvent(event, findPrimaryScroller(session.element));
     const registered = this.activeId ? this.sessions.get(this.activeId) : null;
     if (!registered) return;
     this.ensureIndex(registered);
     const radius = snapshot.sizes.eraser / 2;
-    const candidates = registered.index.query({
-      left: point.x - radius - 48,
-      top: point.y - radius - 48,
-      right: point.x + radius + 48,
-      bottom: point.y + radius + 48,
-    });
     let changed = false;
-    for (const stroke of candidates) {
-      if (!gesture.erasedIds.has(stroke.id) && strokeTouchesPoint(stroke, point, radius)) {
-        gesture.erasedIds.add(stroke.id);
-        changed = true;
+    const origin = viewportOrigin(gesture.scroller);
+    for (const event of events) {
+      const point: StrokePoint = {
+        x: event.clientX + origin.x,
+        y: event.clientY + origin.y,
+        pressure: event.pointerType === "mouse" ? 0.5 : event.pressure > 0 ? event.pressure : 0.5,
+        time: event.timeStamp,
+      };
+      const candidates = registered.index.query({
+        left: point.x - radius - 48,
+        top: point.y - radius - 48,
+        right: point.x + radius + 48,
+        bottom: point.y + radius + 48,
+      });
+      for (const stroke of candidates) {
+        if (!gesture.erasedIds.has(stroke.id) && strokeTouchesPoint(stroke, point, radius)) {
+          gesture.erasedIds.add(stroke.id);
+          changed = true;
+        }
       }
     }
     if (!changed) return;
-    gesture.workingStrokes = (gesture.originalStrokes ?? snapshot.strokes)
-      .filter((stroke) => !gesture.erasedIds.has(stroke.id));
-    if (registered) {
-      registered.source = gesture.workingStrokes;
-      registered.index.rebuild(gesture.workingStrokes);
-    }
     this.scheduleCommittedDraw();
   }
 
@@ -521,8 +554,9 @@ export class PageDrawingSurface {
     if (commit && session) {
       if ((gesture.mode === "drawing" || gesture.mode === "pending") && gesture.stroke) {
         session.commit([...session.getSnapshot().strokes, gesture.stroke]);
-      } else if (gesture.mode === "erasing" && gesture.workingStrokes && gesture.erasedIds.size > 0) {
-        session.commit(gesture.workingStrokes);
+      } else if (gesture.mode === "erasing" && gesture.erasedIds.size > 0) {
+        const original = gesture.originalStrokes ?? session.getSnapshot().strokes;
+        session.commit(original.filter((stroke) => !gesture.erasedIds.has(stroke.id)));
       }
     }
     this.gesture = null;
@@ -557,6 +591,7 @@ export class PageDrawingSurface {
     const snapshot = session.getSnapshot();
     const shouldErase = !immediatePan && (snapshot.tool === "eraser" || isPenEraser);
     const ratio = this.interactiveRatio();
+    const scroller = this.activeId ? this.sessionScroller(this.sessions.get(this.activeId)!) : null;
     this.resizeCanvas(this.live, ratio);
     this.clearCanvas(this.live);
     const gesture: Gesture = {
@@ -568,13 +603,13 @@ export class PageDrawingSurface {
       lastClientX: event.clientX,
       lastClientY: event.clientY,
       longPressTimer: null,
-      stroke: shouldErase || immediatePan ? null : this.createStroke(event, session),
+      stroke: shouldErase || immediatePan ? null : this.createStroke(event, session, scroller),
       renderedPointCount: 0,
       originalStrokes: shouldErase ? snapshot.strokes : null,
-      workingStrokes: shouldErase ? snapshot.strokes : null,
       erasedIds: new Set(),
       scrollTargets: immediatePan ? this.chooseScrollTargets(event, session) : null,
       ratio,
+      scroller,
     };
     this.gesture = gesture;
 
@@ -586,7 +621,7 @@ export class PageDrawingSurface {
         if (this.gesture === gesture && gesture.mode === "pending") this.enterPan(event, gesture, session);
       }, LONG_PRESS_MS);
     } else if (shouldErase) {
-      this.eraseAt(event, gesture, session);
+      this.eraseSamples([event], gesture, session);
     } else {
       this.queueLiveDraw();
     }
@@ -615,18 +650,12 @@ export class PageDrawingSurface {
     );
     const wasPending = gesture.mode === "pending";
     if (wasPending && gesture.stroke) {
-      const scroller = findPrimaryScroller(session.element);
-      for (const sample of event.getCoalescedEvents?.() ?? [event]) {
-        const point = pointFromEvent(sample, scroller);
-        const previous = gesture.stroke.points.at(-1);
-        if (!previous || previous.x !== point.x || previous.y !== point.y) gesture.stroke.points.push(point);
-      }
+      appendStrokeSamples(gesture.stroke, eventSamples(event), gesture.scroller);
     }
     if (gesture.mode === "pending" && movedToDrawing) {
       if (session.getSnapshot().tool === "eraser") {
         gesture.stroke = null;
         gesture.originalStrokes = session.getSnapshot().strokes;
-        gesture.workingStrokes = gesture.originalStrokes;
         this.startErasing(gesture);
       } else {
         this.startDrawing(gesture);
@@ -645,16 +674,10 @@ export class PageDrawingSurface {
         gesture.lastClientY = event.clientY;
         return;
       }
-      const coalesced = event.getCoalescedEvents?.() ?? [event];
-      const scroller = findPrimaryScroller(session.element);
-      for (const sample of coalesced) {
-        const point = pointFromEvent(sample, scroller);
-        const previous = gesture.stroke.points.at(-1);
-        if (!previous || previous.x !== point.x || previous.y !== point.y) gesture.stroke.points.push(point);
-      }
+      appendStrokeSamples(gesture.stroke, eventSamples(event), gesture.scroller);
       this.queueLiveDraw();
     } else if (gesture.mode === "erasing") {
-      for (const sample of event.getCoalescedEvents?.() ?? [event]) this.eraseAt(sample, gesture, session);
+      this.eraseSamples(eventSamples(event), gesture, session);
     }
     gesture.lastClientX = event.clientX;
     gesture.lastClientY = event.clientY;
@@ -670,7 +693,7 @@ export class PageDrawingSurface {
     const session = this.activeSession();
     if (session && this.gesture.mode === "pending" && !this.gesture.stroke) {
       this.startErasing(this.gesture);
-      this.eraseAt(event, this.gesture, session);
+      this.eraseSamples([event], this.gesture, session);
     }
     this.finishGesture(true);
   };
@@ -723,6 +746,7 @@ export class PageDrawingSurface {
   };
 
   private onScroll = () => {
+    this.committedRevision += 1;
     if (this.scrollFrame === null) {
       this.scrollFrame = requestAnimationFrame(() => {
         this.scrollFrame = null;
@@ -754,6 +778,7 @@ export class PageDrawingSurface {
   };
 
   private onResize = () => {
+    this.committedRevision += 1;
     if (this.activeId) this.resizeCanvas(this.live, this.interactiveRatio());
     else {
       this.live.width = 1;

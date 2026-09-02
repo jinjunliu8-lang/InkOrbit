@@ -34,4 +34,26 @@ describe("stroke spatial index", () => {
     index.rebuild([stroke("long", 10, 10, 1000)]);
     expect(index.query({ left: 0, top: 0, right: 1200, bottom: 300 })).toHaveLength(1);
   });
+
+  it("incrementally indexes immutable append-only stroke updates", () => {
+    const index = new StrokeGridIndex();
+    const first = stroke("first", 100, 100);
+    const second = stroke("second", 100, 2200);
+    index.rebuild([first]);
+
+    expect(index.sync([first, second])).toBe("appended");
+    expect(index.query({ left: 0, top: 2000, right: 500, bottom: 2500 })).toEqual([second]);
+    expect(index.sync([first, second])).toBe("unchanged");
+  });
+
+  it("rebuilds when undo or erase replaces existing history", () => {
+    const index = new StrokeGridIndex();
+    const first = stroke("first", 100, 100);
+    const second = stroke("second", 100, 2200);
+    index.rebuild([first, second]);
+
+    expect(index.sync([second])).toBe("rebuilt");
+    expect(index.query({ left: 0, top: 0, right: 500, bottom: 500 })).toEqual([]);
+    expect(index.query({ left: 0, top: 2000, right: 500, bottom: 2500 })).toEqual([second]);
+  });
 });

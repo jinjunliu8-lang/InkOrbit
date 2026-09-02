@@ -40,22 +40,48 @@ export class StrokeGridIndex {
 
   constructor(private readonly cellSize = STROKE_GRID_SIZE) {}
 
+  private add(stroke: Stroke) {
+    const bounds = strokeBounds(stroke);
+    if (!bounds) return;
+    const range = cellRange(bounds, this.cellSize);
+    for (let x = range.minX; x <= range.maxX; x += 1) {
+      for (let y = range.minY; y <= range.maxY; y += 1) {
+        const key = `${x}:${y}`;
+        const bucket = this.cells.get(key);
+        if (bucket) bucket.push(stroke);
+        else this.cells.set(key, [stroke]);
+      }
+    }
+  }
+
   rebuild(strokes: Stroke[]) {
     this.cells.clear();
     this.all = strokes;
-    for (const stroke of strokes) {
-      const bounds = strokeBounds(stroke);
-      if (!bounds) continue;
-      const range = cellRange(bounds, this.cellSize);
-      for (let x = range.minX; x <= range.maxX; x += 1) {
-        for (let y = range.minY; y <= range.maxY; y += 1) {
-          const key = `${x}:${y}`;
-          const bucket = this.cells.get(key);
-          if (bucket) bucket.push(stroke);
-          else this.cells.set(key, [stroke]);
-        }
-      }
+    for (const stroke of strokes) this.add(stroke);
+  }
+
+  /**
+   * The common write path appends one immutable stroke. Preserve the existing
+   * grid in that case so completing a stroke stays O(new strokes), not
+   * O(all history). Undo, erase, migration and replacement still rebuild.
+   */
+  sync(strokes: Stroke[]): "unchanged" | "appended" | "rebuilt" {
+    if (strokes === this.all) return "unchanged";
+    const previous = this.all;
+    const sharesPreviousPrefix = strokes.length >= previous.length &&
+      previous.every((stroke, index) => strokes[index] === stroke);
+    if (sharesPreviousPrefix && strokes.length === previous.length) {
+      this.all = strokes;
+      return "unchanged";
     }
+    const isAppend = sharesPreviousPrefix;
+    if (!isAppend) {
+      this.rebuild(strokes);
+      return "rebuilt";
+    }
+    this.all = strokes;
+    for (let index = previous.length; index < strokes.length; index += 1) this.add(strokes[index]);
+    return "appended";
   }
 
   query(bounds: Bounds): Stroke[] {

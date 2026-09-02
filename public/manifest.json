@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "InkOrbit - AI 答案批注",
-  "version": "0.4.4",
+  "version": "0.4.5",
   "description": "用悬浮墨环和数位笔直接在 ChatGPT 回答上圈画批注，数据仅保存在本机。",
   "action": {
     "default_title": "InkOrbit（墨环）"

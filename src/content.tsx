@@ -50,6 +50,7 @@ interface MountedAnswer {
 }
 
 const mounted = new Map<HTMLElement, MountedAnswer>();
+const dirtyMessages = new Set<HTMLElement>();
 let scanTimer: number | null = null;
 let answerSequence = 0;
 let floatingRenderPending = false;
@@ -172,6 +173,7 @@ function scan() {
   const conversationId = getConversationId();
   if (conversationId !== lastConversationId) {
     lastConversationId = conversationId;
+    dirtyMessages.clear();
     for (const [, record] of mounted) {
       record.identity = null;
       record.identityText = null;
@@ -187,16 +189,21 @@ function scan() {
 
   messages.forEach((message, index) => {
     const record = ensureMounted(message);
-    const text = getAnswerText(message);
-    if (record.lastText !== text) {
-      record.lastText = text;
-      record.lastChangedAt = now;
-      record.identity = null;
-      record.identityText = null;
-      scheduleScan(1250);
+    const isLast = index === messages.length - 1;
+    const shouldReadText = !record.identity || dirtyMessages.has(message) || (isLast && globallyGenerating);
+    let text = record.lastText;
+    if (shouldReadText) {
+      text = getAnswerText(message);
+      dirtyMessages.delete(message);
+      if (record.lastText !== text) {
+        record.lastText = text;
+        record.lastChangedAt = now;
+        record.identity = null;
+        record.identityText = null;
+        scheduleScan(1250);
+      }
     }
 
-    const isLast = index === messages.length - 1;
     const streaming = isLast && (globallyGenerating || now - record.lastChangedAt < 1100);
     if (record.controllerState.streaming !== streaming) {
       record.controllerState = { ...record.controllerState, streaming };
@@ -206,7 +213,7 @@ function scan() {
 
     if (!streaming && text && record.identityText !== text && record.hashingText !== text) {
       record.hashingText = text;
-      void createAnswerIdentity(message, messages).then((identity) => {
+      void createAnswerIdentity(message, messages, text).then((identity) => {
         record.hashingText = null;
         if (!message.isConnected || getAnswerText(message) !== text) return;
         record.identity = identity;
@@ -222,11 +229,27 @@ function scan() {
     record.host.remove();
     if (message.isConnected) message.style.position = record.originalPosition;
     mounted.delete(message);
+    dirtyMessages.delete(message);
     scheduleFloatingRender();
   }
 }
 
-const observer = new MutationObserver(() => scheduleScan());
+function trackedMessageFor(node: Node): HTMLElement | null {
+  let element = node instanceof HTMLElement ? node : node.parentElement;
+  while (element) {
+    if (mounted.has(element)) return element;
+    element = element.parentElement;
+  }
+  return null;
+}
+
+const observer = new MutationObserver((records) => {
+  for (const record of records) {
+    const message = trackedMessageFor(record.target);
+    if (message) dirtyMessages.add(message);
+  }
+  scheduleScan();
+});
 observer.observe(document.documentElement, {
   childList: true,
   characterData: true,

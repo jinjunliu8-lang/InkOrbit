@@ -71,8 +71,9 @@ export function isGeneratingGlobally(root: ParentNode = document): boolean {
 export async function createAnswerIdentity(
   element: HTMLElement,
   allMessages: HTMLElement[],
+  knownText?: string,
 ): Promise<AnswerIdentity> {
-  const text = getAnswerText(element);
+  const text = knownText ?? getAnswerText(element);
   return {
     conversationId: getConversationId(),
     messageId: getMessageId(element, allMessages),

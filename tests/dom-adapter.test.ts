@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   findAssistantMessages,
+  createAnswerIdentity,
   getAnswerText,
   getConversationId,
   getMessageId,
@@ -63,6 +64,19 @@ describe("ChatGPT DOM adapter", () => {
     const clone = vi.spyOn(answer, "cloneNode");
     expect(getAnswerText(answer)).toBe("Fast answer");
     expect(clone).not.toHaveBeenCalled();
+  });
+
+  it("reuses already-read answer text when creating an identity", async () => {
+    const answer = document.createElement("div");
+    answer.dataset.messageId = "answer-known-text";
+    Object.defineProperty(answer, "innerText", {
+      get: () => { throw new Error("answer text should not be read twice"); },
+      configurable: true,
+    });
+
+    const identity = await createAnswerIdentity(answer, [answer], "Known answer");
+    expect(identity.messageId).toBe("answer-known-text");
+    expect(identity.contentHash).toHaveLength(64);
   });
 
   it("extracts conversation ids and detects generation controls", () => {
