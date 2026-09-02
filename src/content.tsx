@@ -119,6 +119,7 @@ function ensureMounted(message: HTMLElement): MountedAnswer {
       canUndo: false,
       canRedo: false,
       strokeCount: 0,
+      historyRevision: 0,
       ready: false,
       streaming: false,
     },

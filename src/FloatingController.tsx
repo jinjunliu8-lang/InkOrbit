@@ -21,6 +21,12 @@ import {
   type StoredFloatingPosition,
   type ViewportSize,
 } from "./floating-geometry";
+import {
+  clearAllTargets,
+  isBulkClearBatchStale,
+  stepBulkClearHistory,
+  type BulkClearBatch,
+} from "./bulk-clear";
 import type {
   ActiveTool,
   AnnotationController,
@@ -121,11 +127,13 @@ export function FloatingController({ targets }: FloatingControllerProps) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [secondaryTool, setSecondaryTool] = useState<ActiveTool | null>(null);
   const [toast, setToast] = useState<string | null>(null);
+  const [bulkClearBatch, setBulkClearBatch] = useState<BulkClearBatch | null>(null);
   const dragRef = useRef<DragState | null>(null);
   const toastTimerRef = useRef<number | null>(null);
 
   const activeTarget = targets.find((target) => target.key === activeKey) ?? null;
   const currentTool = activeTarget?.state.tool ?? "pen";
+  const totalStrokeCount = targets.reduce((total, target) => total + target.state.strokeCount, 0);
   const side = position.x + 26 < viewport.width / 2 ? "left" : "right";
 
   const showToast = useCallback((message: string) => {
@@ -161,6 +169,12 @@ export function FloatingController({ targets }: FloatingControllerProps) {
       setSecondaryTool(null);
     }
   }, [activeKey, targets]);
+
+  useEffect(() => {
+    if (bulkClearBatch && isBulkClearBatchStale(targets, bulkClearBatch)) {
+      setBulkClearBatch(null);
+    }
+  }, [bulkClearBatch, targets]);
 
   useEffect(() => {
     if (activeTarget && (!activeTarget.state.ready || activeTarget.state.streaming)) finish();
@@ -242,27 +256,53 @@ export function FloatingController({ targets }: FloatingControllerProps) {
     activeTarget?.controller?.setTool(tool, settings);
   };
 
+  const undo = useCallback(() => {
+    if (bulkClearBatch?.phase === "cleared") {
+      setBulkClearBatch(stepBulkClearHistory(targets, bulkClearBatch, "undo"));
+      showToast("已恢复本对话全部笔迹");
+      return;
+    }
+    activeTarget?.controller?.undo();
+  }, [activeTarget, bulkClearBatch, showToast, targets]);
+
+  const redo = useCallback(() => {
+    if (bulkClearBatch?.phase === "restored") {
+      setBulkClearBatch(stepBulkClearHistory(targets, bulkClearBatch, "redo"));
+      showToast("已再次清空本对话全部笔迹");
+      return;
+    }
+    activeTarget?.controller?.redo();
+  }, [activeTarget, bulkClearBatch, showToast, targets]);
+
+  const clearConversation = useCallback(() => {
+    const batch = clearAllTargets(targets);
+    if (!batch) {
+      showToast("当前对话没有笔迹");
+      return;
+    }
+    setBulkClearBatch(batch);
+    setSecondaryTool(null);
+    const clearedCount = Object.keys(batch.revisions).length;
+    showToast(`已清空本对话 ${clearedCount} 处笔迹，点撤销可恢复`);
+  }, [showToast, targets]);
+
   const primaryItems = useMemo<MenuItem[]>(
     () => [
       { id: "pen", label: "钢笔；再次点击设置颜色和粗细", icon: icons.pen, active: currentTool === "pen", action: () => chooseTool("pen") },
       { id: "highlighter", label: "荧光笔；再次点击设置粗细", icon: icons.highlighter, active: currentTool === "highlighter", action: () => chooseTool("highlighter") },
       { id: "eraser", label: "橡皮；再次点击设置大小或清空", icon: icons.eraser, active: currentTool === "eraser", action: () => chooseTool("eraser") },
-      { id: "undo", label: "撤销", icon: icons.undo, disabled: !activeTarget?.state.canUndo, action: () => activeTarget?.controller?.undo() },
-      { id: "redo", label: "重做", icon: icons.redo, disabled: !activeTarget?.state.canRedo, action: () => activeTarget?.controller?.redo() },
+      { id: "undo", label: "撤销", icon: icons.undo, disabled: bulkClearBatch?.phase !== "cleared" && !activeTarget?.state.canUndo, action: undo },
+      { id: "redo", label: "重做", icon: icons.redo, disabled: bulkClearBatch?.phase !== "restored" && !activeTarget?.state.canRedo, action: redo },
       { id: "done", label: "完成批注", icon: icons.done, action: finish },
       {
         id: "clear",
-        label: "一键清空全部笔迹（可撤销）",
+        label: "一键清空当前对话全部笔迹（可撤销）",
         icon: icons.trash,
-        disabled: !activeTarget || activeTarget.state.strokeCount === 0,
-        action: () => {
-          activeTarget?.controller?.clear();
-          setSecondaryTool(null);
-          showToast("笔迹已清空，可点击撤销恢复");
-        },
+        disabled: totalStrokeCount === 0,
+        action: clearConversation,
       },
     ],
-    [activeTarget, currentTool, finish, showToast],
+    [activeTarget, bulkClearBatch, clearConversation, currentTool, finish, redo, totalStrokeCount, undo],
   );
 
   const secondaryItems = useMemo<MenuItem[]>(() => {
@@ -304,16 +344,18 @@ export function FloatingController({ targets }: FloatingControllerProps) {
       ...eraserSizes,
       {
         id: "clear",
-        label: "清空全部笔迹（可撤销）",
+        label: "清空当前回答笔迹（可撤销）",
         icon: icons.trash,
         disabled: activeTarget.state.strokeCount === 0,
         action: () => {
+          setBulkClearBatch(null);
           activeTarget.controller?.clear();
           setSecondaryTool(null);
+          showToast("已清空当前回答笔迹，可点撤销恢复");
         },
       },
     ];
-  }, [activeTarget, secondaryTool]);
+  }, [activeTarget, secondaryTool, showToast]);
 
   const primaryPositions = computePrimaryMenuPositions(position, side, primaryItems.length, viewport);
   const secondaryPositions = computeRadialPositions(position, side, secondaryItems.length, viewport, 154);

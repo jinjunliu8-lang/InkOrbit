@@ -59,6 +59,8 @@ export interface AnnotationWidgetState {
   canUndo: boolean;
   canRedo: boolean;
   strokeCount: number;
+  /** Increments after every commit, undo, or redo so grouped history stays coherent. */
+  historyRevision: number;
   ready: boolean;
   streaming: boolean;
 }

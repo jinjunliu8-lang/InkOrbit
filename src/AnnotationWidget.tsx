@@ -275,6 +275,7 @@ export const AnnotationWidget = forwardRef<AnnotationController, AnnotationWidge
       canUndo: pastRef.current.length > 0,
       canRedo: futureRef.current.length > 0,
       strokeCount: strokes.length,
+      historyRevision,
       ready: !loading && Boolean(identity),
       streaming,
     });
