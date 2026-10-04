@@ -39,6 +39,24 @@ describe("ChatGPT DOM adapter", () => {
     expect(getMessageId(answers[0], answers)).toBe("turn-assistant");
   });
 
+  it("recognizes search-unit answers in the newer ChatGPT layout", () => {
+    document.body.innerHTML = `
+      <div data-chatgpt-search-unit-key="fallback-turn-0:2:assistant"
+        data-chatgpt-search-message-ids="answer-new answer-new">
+        <h4 data-conversation-role="assistant">ChatGPT 说：</h4>
+        <div>New answer content</div>
+      </div>
+      <div data-chatgpt-search-unit-key="fallback-turn-1:1:user">
+        <h4 data-conversation-role="user">你说：</h4>
+        <div>User prompt</div>
+      </div>
+    `;
+    const answers = findAssistantMessages();
+    expect(answers).toHaveLength(1);
+    expect(getAnswerText(answers[0])).toBe("New answer content");
+    expect(getMessageId(answers[0], answers)).toBe("answer-new");
+  });
+
   it("falls back to a deterministic answer index", () => {
     document.body.innerHTML = `
       <div data-message-author-role="assistant">one</div>

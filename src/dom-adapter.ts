@@ -6,6 +6,7 @@ import type { AnswerIdentity } from "./types";
 const ASSISTANT_SELECTOR = [
   '[data-message-author-role="assistant"]',
   '[data-turn="assistant"]',
+  'h4[data-conversation-role="assistant"]',
 ].join(",");
 const STOP_BUTTON_SELECTOR = [
   '[data-testid="stop-button"]',
@@ -14,22 +15,37 @@ const STOP_BUTTON_SELECTOR = [
 ].join(",");
 
 export function findAssistantMessages(root: ParentNode = document): HTMLElement[] {
-  return Array.from(root.querySelectorAll<HTMLElement>(ASSISTANT_SELECTOR)).filter((element) => {
-    // The current layout wraps the old assistant message node in a wider
-    // `data-turn` section. Prefer the innermost node so the canvas follows the
-    // actual answer column instead of spanning the entire page.
-    return element.querySelector(ASSISTANT_SELECTOR) === null;
-  });
+  const candidates = new Set(
+    Array.from(root.querySelectorAll<HTMLElement>(ASSISTANT_SELECTOR))
+      .map((element) => element.matches('h4[data-conversation-role="assistant"]')
+        ? element.parentElement
+        : element)
+      .filter((element): element is HTMLElement => element instanceof HTMLElement),
+  );
+  // ChatGPT may expose both the turn wrapper and the answer node. Keep the
+  // innermost answer so selecting it never includes the user's prompt.
+  for (const element of candidates) {
+    for (let ancestor = element.parentElement; ancestor; ancestor = ancestor.parentElement) {
+      candidates.delete(ancestor);
+    }
+  }
+  return Array.from(candidates);
 }
 
 export function getAnswerText(element: HTMLElement): string {
+  // The newer search-unit wrapper includes an accessible role heading before
+  // the actual answer. Hash only its answer child to preserve stable content.
+  const roleHeading = element.querySelector<HTMLElement>(':scope > h4[data-conversation-role="assistant"]');
+  const answer = roleHeading?.nextElementSibling instanceof HTMLElement
+    ? roleHeading.nextElementSibling
+    : element;
   // In real browsers innerText already excludes our display:none host. Avoid
   // cloning a potentially very large answer during every observer scan.
-  if (typeof element.innerText === "string") return normalizeAnswerText(element.innerText);
+  if (typeof answer.innerText === "string") return normalizeAnswerText(answer.innerText);
 
   // jsdom and older DOM implementations may not expose innerText. Keep the
   // clone-based fallback so injected extension text is never hashed.
-  const clone = element.cloneNode(true) as HTMLElement;
+  const clone = answer.cloneNode(true) as HTMLElement;
   clone.querySelectorAll('[data-paintgpt-annotation-host="true"]').forEach((host) => host.remove());
   return normalizeAnswerText(clone.innerText || clone.textContent || "");
 }
@@ -50,6 +66,11 @@ export function getMessageId(element: HTMLElement, allMessages: HTMLElement[]): 
     element.querySelector<HTMLElement>("[data-turn-id]");
   const turnId = turn?.dataset.turnId;
   if (turnId) return turnId;
+
+  const searchUnit = element.closest<HTMLElement>("[data-chatgpt-search-message-ids]") ??
+    element.querySelector<HTMLElement>("[data-chatgpt-search-message-ids]");
+  const searchMessageId = searchUnit?.dataset.chatgptSearchMessageIds?.trim().split(/\s+/)[0];
+  if (searchMessageId) return searchMessageId;
 
   const conversationTurn = element.closest<HTMLElement>('[data-testid^="conversation-turn-"]') ??
     element.querySelector<HTMLElement>('[data-testid^="conversation-turn-"]');
