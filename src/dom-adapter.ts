@@ -6,18 +6,21 @@ import type { AnswerIdentity } from "./types";
 const ASSISTANT_SELECTOR = [
   '[data-message-author-role="assistant"]',
   '[data-turn="assistant"]',
-  'h4[data-conversation-role="assistant"]',
+  '[data-conversation-role="assistant"]',
 ].join(",");
 const STOP_BUTTON_SELECTOR = [
   '[data-testid="stop-button"]',
   'button[aria-label="Stop generating"]',
   'button[aria-label="停止生成"]',
+  'button[aria-label="停止"]',
+  'button[aria-label="Stop"]',
 ].join(",");
 
 export function findAssistantMessages(root: ParentNode = document): HTMLElement[] {
   const candidates = new Set(
     Array.from(root.querySelectorAll<HTMLElement>(ASSISTANT_SELECTOR))
-      .map((element) => element.matches('h4[data-conversation-role="assistant"]')
+      .map((element) => element.matches('[data-conversation-role="assistant"]') &&
+        element.matches('h1,h2,h3,h4,h5,h6,[role="heading"]')
         ? element.parentElement
         : element)
       .filter((element): element is HTMLElement => element instanceof HTMLElement),
@@ -35,7 +38,7 @@ export function findAssistantMessages(root: ParentNode = document): HTMLElement[
 export function getAnswerText(element: HTMLElement): string {
   // The newer search-unit wrapper includes an accessible role heading before
   // the actual answer. Hash only its answer child to preserve stable content.
-  const roleHeading = element.querySelector<HTMLElement>(':scope > h4[data-conversation-role="assistant"]');
+  const roleHeading = element.querySelector<HTMLElement>(':scope > [data-conversation-role="assistant"]:is(h1,h2,h3,h4,h5,h6,[role="heading"])');
   const answer = roleHeading?.nextElementSibling instanceof HTMLElement
     ? roleHeading.nextElementSibling
     : element;

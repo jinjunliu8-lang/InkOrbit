@@ -1,6 +1,7 @@
 import { strokeTouchesPoint } from "./geometry";
 import { renderPageStrokeSegments } from "./renderer";
 import { StrokeGridIndex, type Bounds } from "./stroke-index";
+import { findPrimaryScroller, pageOrigin } from "./page-coordinates";
 import type { ActiveTool, Stroke, StrokePoint, ToolSizes } from "./types";
 
 const LONG_PRESS_MS = 180;
@@ -25,7 +26,6 @@ interface RegisteredSession {
   session: DrawingSurfaceSession;
   source: Stroke[] | null;
   index: StrokeGridIndex;
-  scroller: HTMLElement | null;
 }
 
 interface ScrollTargets {
@@ -57,7 +57,7 @@ interface Gesture {
   erasedIds: Set<string>;
   scrollTargets: ScrollTargets | null;
   ratio: number;
-  scroller: HTMLElement | null;
+  coordinateElement: HTMLElement;
 }
 
 function makeStrokeId() {
@@ -97,19 +97,8 @@ function scrollByAxis(target: HTMLElement | Window | null, axis: "x" | "y", delt
   else target.scrollTop += delta;
 }
 
-function findPrimaryScroller(element: HTMLElement): HTMLElement | null {
-  return nearestScrollable(element, "y");
-}
-
-function viewportOrigin(scroller: HTMLElement | null) {
-  return {
-    x: window.scrollX + (scroller?.scrollLeft ?? 0),
-    y: window.scrollY + (scroller?.scrollTop ?? 0),
-  };
-}
-
-function pointFromEvent(event: PointerEvent, scroller: HTMLElement | null): StrokePoint {
-  const origin = viewportOrigin(scroller);
+function pointFromEvent(event: PointerEvent, element: HTMLElement): StrokePoint {
+  const origin = pageOrigin(element);
   return {
     x: event.clientX + origin.x,
     y: event.clientY + origin.y,
@@ -123,8 +112,8 @@ function eventSamples(event: PointerEvent): PointerEvent[] {
   return coalesced && coalesced.length > 0 ? coalesced : [event];
 }
 
-function appendStrokeSamples(stroke: Stroke, samples: readonly PointerEvent[], scroller: HTMLElement | null) {
-  const origin = viewportOrigin(scroller);
+function appendStrokeSamples(stroke: Stroke, samples: readonly PointerEvent[], element: HTMLElement) {
+  const origin = pageOrigin(element);
   for (const sample of samples) {
     const point: StrokePoint = {
       x: sample.clientX + origin.x,
@@ -230,7 +219,6 @@ export class PageDrawingSurface {
       session,
       source: null,
       index: new StrokeGridIndex(),
-      scroller: findPrimaryScroller(session.element),
     });
     this.scheduleCommittedDraw();
     return () => {
@@ -328,15 +316,7 @@ export class PageDrawingSurface {
     return registered;
   }
 
-  private sessionScroller(registered: RegisteredSession) {
-    if (registered.scroller && !registered.scroller.isConnected) {
-      registered.scroller = findPrimaryScroller(registered.session.element);
-    }
-    return registered.scroller;
-  }
-
-  private visibleBounds(scroller: HTMLElement | null): Bounds {
-    const origin = viewportOrigin(scroller);
+  private visibleBounds(origin: { x: number; y: number }): Bounds {
     return {
       left: origin.x - 32,
       top: origin.y - 32,
@@ -363,14 +343,9 @@ export class PageDrawingSurface {
     this.clearCanvas(this.committed);
     const context = this.committed.getContext("2d");
     if (!context) return;
-    const viewportCache = new Map<HTMLElement | null, { origin: { x: number; y: number }; bounds: Bounds }>();
     for (const { id, registered, strokes } of drawable) {
-      const scroller = this.sessionScroller(registered);
-      let viewport = viewportCache.get(scroller);
-      if (!viewport) {
-        viewport = { origin: viewportOrigin(scroller), bounds: this.visibleBounds(scroller) };
-        viewportCache.set(scroller, viewport);
-      }
+      const origin = pageOrigin(registered.session.element);
+      const viewport = { origin, bounds: this.visibleBounds(origin) };
       const erasedIds = id === this.activeId && this.gesture?.mode === "erasing"
         ? this.gesture.erasedIds
         : null;
@@ -412,7 +387,7 @@ export class PageDrawingSurface {
     else if (this.averageFrameMs < 5 && this.interactiveRatioIndex < INTERACTIVE_RATIOS.length - 1) this.interactiveRatioIndex += 1;
   }
 
-  private createStroke(event: PointerEvent, session: DrawingSurfaceSession, scroller: HTMLElement | null) {
+  private createStroke(event: PointerEvent, session: DrawingSurfaceSession) {
     const snapshot = session.getSnapshot();
     const drawingTool = snapshot.tool === "highlighter" ? "highlighter" : "pen";
     return {
@@ -421,7 +396,7 @@ export class PageDrawingSurface {
       color: drawingTool === "highlighter" ? "#facc15" : snapshot.penColor,
       baseWidth: snapshot.sizes[drawingTool],
       opacity: drawingTool === "highlighter" ? 0.3 : 1,
-      points: [pointFromEvent(event, scroller)],
+      points: [pointFromEvent(event, session.element)],
     } satisfies Stroke;
   }
 
@@ -494,22 +469,37 @@ export class PageDrawingSurface {
     if (this.liveFrame !== null) return;
     this.liveFrame = requestAnimationFrame(() => {
       this.liveFrame = null;
-      const gesture = this.gesture;
-      const session = this.activeSession();
-      if (!gesture?.stroke || !session || gesture.mode !== "drawing") return;
-      const context = this.live.getContext("2d");
-      if (!context) return;
-      const started = performance.now();
-      renderPageStrokeSegments(
-        context,
-        gesture.stroke,
-        gesture.renderedPointCount,
-        viewportOrigin(gesture.scroller),
-        gesture.ratio,
-      );
-      gesture.renderedPointCount = gesture.stroke.points.length;
-      this.recordFrame(performance.now() - started);
+      this.drawLive();
     });
+  }
+
+  private drawLive() {
+    const gesture = this.gesture;
+    if (!gesture?.stroke || !this.activeSession() ||
+      (gesture.mode !== "drawing" && gesture.mode !== "pending")) return;
+    const context = this.live.getContext("2d");
+    if (!context) return;
+    const started = performance.now();
+    renderPageStrokeSegments(
+      context,
+      gesture.stroke,
+      gesture.renderedPointCount,
+      pageOrigin(gesture.coordinateElement),
+      gesture.ratio,
+    );
+    gesture.renderedPointCount = gesture.stroke.points.length;
+    this.recordFrame(performance.now() - started);
+  }
+
+  private redrawLive() {
+    if (this.liveFrame !== null) {
+      cancelAnimationFrame(this.liveFrame);
+      this.liveFrame = null;
+    }
+    if (!this.gesture?.stroke) return;
+    this.clearCanvas(this.live);
+    this.gesture.renderedPointCount = 0;
+    this.drawLive();
   }
 
   private eraseSamples(events: readonly PointerEvent[], gesture: Gesture, session: DrawingSurfaceSession) {
@@ -519,7 +509,7 @@ export class PageDrawingSurface {
     this.ensureIndex(registered);
     const radius = snapshot.sizes.eraser / 2;
     let changed = false;
-    const origin = viewportOrigin(gesture.scroller);
+    const origin = pageOrigin(gesture.coordinateElement);
     for (const event of events) {
       const point: StrokePoint = {
         x: event.clientX + origin.x,
@@ -591,7 +581,6 @@ export class PageDrawingSurface {
     const snapshot = session.getSnapshot();
     const shouldErase = !immediatePan && (snapshot.tool === "eraser" || isPenEraser);
     const ratio = this.interactiveRatio();
-    const scroller = this.activeId ? this.sessionScroller(this.sessions.get(this.activeId)!) : null;
     this.resizeCanvas(this.live, ratio);
     this.clearCanvas(this.live);
     const gesture: Gesture = {
@@ -603,13 +592,13 @@ export class PageDrawingSurface {
       lastClientX: event.clientX,
       lastClientY: event.clientY,
       longPressTimer: null,
-      stroke: shouldErase || immediatePan ? null : this.createStroke(event, session, scroller),
+      stroke: shouldErase || immediatePan ? null : this.createStroke(event, session),
       renderedPointCount: 0,
       originalStrokes: shouldErase ? snapshot.strokes : null,
       erasedIds: new Set(),
       scrollTargets: immediatePan ? this.chooseScrollTargets(event, session) : null,
       ratio,
-      scroller,
+      coordinateElement: session.element,
     };
     this.gesture = gesture;
 
@@ -650,7 +639,7 @@ export class PageDrawingSurface {
     );
     const wasPending = gesture.mode === "pending";
     if (wasPending && gesture.stroke) {
-      appendStrokeSamples(gesture.stroke, eventSamples(event), gesture.scroller);
+      appendStrokeSamples(gesture.stroke, eventSamples(event), gesture.coordinateElement);
     }
     if (gesture.mode === "pending" && movedToDrawing) {
       if (session.getSnapshot().tool === "eraser") {
@@ -674,7 +663,7 @@ export class PageDrawingSurface {
         gesture.lastClientY = event.clientY;
         return;
       }
-      appendStrokeSamples(gesture.stroke, eventSamples(event), gesture.scroller);
+      appendStrokeSamples(gesture.stroke, eventSamples(event), gesture.coordinateElement);
       this.queueLiveDraw();
     } else if (gesture.mode === "erasing") {
       this.eraseSamples(eventSamples(event), gesture, session);
@@ -751,11 +740,9 @@ export class PageDrawingSurface {
       this.scrollFrame = requestAnimationFrame(() => {
         this.scrollFrame = null;
         this.drawCommitted(this.interactiveRatio());
-        if (this.gesture?.stroke) {
-          this.clearCanvas(this.live);
-          this.gesture.renderedPointCount = 0;
-          this.queueLiveDraw();
-        }
+        // Both layers must move in the same frame; queuing another RAF here
+        // leaves the current stroke behind the webpage for one refresh.
+        this.redrawLive();
       });
     }
     this.scheduleHighQualityDraw();
@@ -779,7 +766,10 @@ export class PageDrawingSurface {
 
   private onResize = () => {
     this.committedRevision += 1;
-    if (this.activeId) this.resizeCanvas(this.live, this.interactiveRatio());
+    if (this.activeId) {
+      this.resizeCanvas(this.live, this.gesture?.ratio ?? this.interactiveRatio());
+      this.redrawLive();
+    }
     else {
       this.live.width = 1;
       this.live.height = 1;

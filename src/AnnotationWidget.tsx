@@ -8,6 +8,7 @@ import {
 } from "react";
 import type { DrawingSurfaceSession, PageDrawingSurface } from "./drawing-surface";
 import { loadAnnotation, saveAnnotation } from "./storage";
+import { findPrimaryScroller as findScrollContainer, pageOrigin as viewportOrigin } from "./page-coordinates";
 import type {
   ActiveTool,
   AnnotationController,
@@ -30,22 +31,6 @@ interface AnnotationWidgetProps {
 
 const DEFAULT_PEN_COLOR = "#1f2937";
 const DEFAULT_SIZES: ToolSizes = { pen: 3, highlighter: 18, eraser: 24 };
-
-function findScrollContainer(element: HTMLElement): HTMLElement | null {
-  for (let parent = element.parentElement; parent; parent = parent.parentElement) {
-    const style = getComputedStyle(parent);
-    if (/(auto|scroll|overlay)/.test(style.overflowY) && parent.scrollHeight > parent.clientHeight) return parent;
-  }
-  return null;
-}
-
-function viewportOrigin(element: HTMLElement) {
-  const scroller = findScrollContainer(element);
-  return {
-    x: window.scrollX + (scroller?.scrollLeft ?? 0),
-    y: window.scrollY + (scroller?.scrollTop ?? 0),
-  };
-}
 
 function pageSize(element: HTMLElement): CanvasSize {
   const scroller = findScrollContainer(element);

@@ -66,6 +66,21 @@ describe("ChatGPT DOM adapter", () => {
     expect(getMessageId(answers[1], answers)).toBe("assistant-2");
   });
 
+  it("supports role headings of different levels and direct role containers", () => {
+    document.body.innerHTML = `
+      <section data-chatgpt-search-message-ids="heading-answer">
+        <h5 data-conversation-role="assistant">ChatGPT 说：</h5><div>Heading answer</div>
+      </section>
+      <div data-conversation-role="assistant" data-message-id="container-answer">Container answer</div>
+      <div data-conversation-role="user">Prompt</div>
+      <button aria-label="停止">停止</button>
+    `;
+    const answers = findAssistantMessages();
+    expect(answers.map(getAnswerText)).toEqual(["Heading answer", "Container answer"]);
+    expect(answers.map(answer => getMessageId(answer, answers))).toEqual(["heading-answer", "container-answer"]);
+    expect(isGeneratingGlobally()).toBe(true);
+  });
+
   it("does not include injected extension UI in the answer text", () => {
     document.body.innerHTML = `
       <div data-message-author-role="assistant">
