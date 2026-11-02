@@ -10,6 +10,7 @@ import {
   isGeneratingGlobally,
 } from "./dom-adapter";
 import { widgetStyles } from "./styles";
+import manifest from "../public/manifest.json";
 import type {
   AnnotationController,
   AnnotationWidgetState,
@@ -58,6 +59,7 @@ let lastConversationId = getConversationId();
 
 const floatingHost = document.createElement("div");
 floatingHost.dataset.paintgptFloatingHost = "true";
+floatingHost.dataset.paintgptVersion = manifest.version;
 floatingHost.style.cssText = "position:fixed;inset:0;z-index:2147483646;pointer-events:none;";
 const floatingShadow = floatingHost.attachShadow({ mode: "open" });
 const floatingStyle = document.createElement("style");

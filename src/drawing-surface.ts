@@ -201,6 +201,7 @@ export class PageDrawingSurface {
     this.live.addEventListener("pointermove", this.onPointerMove);
     this.live.addEventListener("pointerup", this.onPointerUp);
     this.live.addEventListener("pointercancel", this.onPointerCancel);
+    this.live.addEventListener("lostpointercapture", this.onLostPointerCapture);
     this.live.addEventListener("wheel", this.onWheel, { passive: false });
     this.live.addEventListener("contextmenu", this.onContextMenu);
     document.addEventListener("scroll", this.onScroll, true);
@@ -266,6 +267,7 @@ export class PageDrawingSurface {
     this.live.removeEventListener("pointermove", this.onPointerMove);
     this.live.removeEventListener("pointerup", this.onPointerUp);
     this.live.removeEventListener("pointercancel", this.onPointerCancel);
+    this.live.removeEventListener("lostpointercapture", this.onLostPointerCapture);
     this.live.removeEventListener("wheel", this.onWheel);
     this.live.removeEventListener("contextmenu", this.onContextMenu);
     document.removeEventListener("scroll", this.onScroll, true);
@@ -436,8 +438,8 @@ export class PageDrawingSurface {
   private finishSecondaryPan(pointerId?: number) {
     const pan = this.secondaryPan;
     if (!pan || (pointerId !== undefined && pan.pointerId !== pointerId)) return false;
-    if (this.live.hasPointerCapture(pan.pointerId)) this.live.releasePointerCapture(pan.pointerId);
     this.secondaryPan = null;
+    if (this.live.hasPointerCapture(pan.pointerId)) this.live.releasePointerCapture(pan.pointerId);
     this.updatePanningClass();
     this.scheduleHighQualityDraw();
     return true;
@@ -538,6 +540,8 @@ export class PageDrawingSurface {
     const gesture = this.gesture;
     const session = this.activeSession();
     if (!gesture) return;
+    // Clear first: releasing capture can itself dispatch lostpointercapture.
+    this.gesture = null;
     if (gesture.longPressTimer !== null) window.clearTimeout(gesture.longPressTimer);
     if (this.live.hasPointerCapture(gesture.pointerId)) this.live.releasePointerCapture(gesture.pointerId);
 
@@ -549,7 +553,6 @@ export class PageDrawingSurface {
         session.commit(original.filter((stroke) => !gesture.erasedIds.has(stroke.id)));
       }
     }
-    this.gesture = null;
     this.updatePanningClass();
     this.clearCanvas(this.live);
     this.resizeCanvas(this.live, this.interactiveRatio());
@@ -568,8 +571,14 @@ export class PageDrawingSurface {
     if (this.gesture) {
       if (event.pointerType === "touch" && !this.secondaryPan && this.gesture.pointerType !== "touch") {
         this.startSecondaryPan(event, session);
+        return;
       }
-      return;
+      // A pen/mouse cannot begin another contact while its previous contact is
+      // still down. Some tablet drivers omit pointerup after focus/capture
+      // changes; recover here instead of rejecting every subsequent stroke.
+      if (event.pointerType !== "touch" && this.gesture.pointerType !== "touch") {
+        this.finishGesture(true);
+      } else return;
     }
     const isMiddleMouse = event.pointerType === "mouse" && event.button === 1;
     const isPenSideButton = event.pointerType === "pen" && (event.button === 2 || event.buttons === 2);
@@ -682,8 +691,18 @@ export class PageDrawingSurface {
     const session = this.activeSession();
     if (session && this.gesture.mode === "pending" && !this.gesture.stroke) {
       this.startErasing(this.gesture);
-      this.eraseSamples([event], this.gesture, session);
     }
+    if (session && this.gesture.mode === "erasing") this.eraseSamples([event], this.gesture, session);
+    else if (this.gesture.stroke && this.gesture.mode !== "panning") {
+      // Short/fast contacts may deliver the endpoint only in pointerup.
+      appendStrokeSamples(this.gesture.stroke, eventSamples(event), this.gesture.coordinateElement);
+    }
+    this.finishGesture(true);
+  };
+
+  private onLostPointerCapture = (event: PointerEvent) => {
+    if (this.finishSecondaryPan(event.pointerId)) return;
+    if (this.gesture?.pointerId !== event.pointerId) return;
     this.finishGesture(true);
   };
 
