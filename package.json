@@ -1,7 +1,7 @@
 {
   "name": "inkorbit",
   "private": true,
-  "version": "0.4.8",
+  "version": "0.4.9",
   "description": "AssistiveTouch-style local annotation canvas for AI answers.",
   "license": "MIT",
   "repository": {

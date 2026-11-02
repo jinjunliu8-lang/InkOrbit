@@ -4,8 +4,6 @@ import { StrokeGridIndex, type Bounds } from "./stroke-index";
 import { findPrimaryScroller, pageOrigin } from "./page-coordinates";
 import type { ActiveTool, Stroke, StrokePoint, ToolSizes } from "./types";
 
-const LONG_PRESS_MS = 180;
-const MOVE_TOLERANCE = 5;
 const HIGH_QUALITY_IDLE_MS = 120;
 const INTERACTIVE_RATIOS = [1, 1.25, 1.5] as const;
 
@@ -40,17 +38,14 @@ interface SecondaryPan {
   scrollTargets: ScrollTargets;
 }
 
-type GestureMode = "pending" | "drawing" | "erasing" | "panning";
+type GestureMode = "drawing" | "erasing" | "panning";
 
 interface Gesture {
   pointerId: number;
   pointerType: string;
   mode: GestureMode;
-  startClientX: number;
-  startClientY: number;
   lastClientX: number;
   lastClientY: number;
-  longPressTimer: number | null;
   stroke: Stroke | null;
   renderedPointCount: number;
   originalStrokes: Stroke[] | null;
@@ -128,15 +123,6 @@ function appendStrokeSamples(stroke: Stroke, samples: readonly PointerEvent[], e
 
 function movement(startX: number, startY: number, x: number, y: number) {
   return Math.hypot(x - startX, y - startY);
-}
-
-function shouldStartDrawing(startX: number, startY: number, x: number, y: number) {
-  return movement(startX, startY, x, y) > MOVE_TOLERANCE;
-}
-
-function classifyPendingGesture(elapsedMs: number, distancePx: number): "pending" | "drawing" | "panning" {
-  if (distancePx > MOVE_TOLERANCE) return "drawing";
-  return elapsedMs >= LONG_PRESS_MS ? "panning" : "pending";
 }
 
 function normalizeWheelDelta(delta: number, deltaMode: number, viewportSize: number) {
@@ -445,28 +431,6 @@ export class PageDrawingSurface {
     return true;
   }
 
-  private enterPan(event: PointerEvent, gesture: Gesture, session: DrawingSurfaceSession) {
-    if (gesture.longPressTimer !== null) window.clearTimeout(gesture.longPressTimer);
-    gesture.longPressTimer = null;
-    gesture.mode = "panning";
-    gesture.stroke = null;
-    gesture.scrollTargets = this.chooseScrollTargets(event, session);
-    this.clearCanvas(this.live);
-    this.updatePanningClass();
-  }
-
-  private startDrawing(gesture: Gesture) {
-    if (gesture.longPressTimer !== null) window.clearTimeout(gesture.longPressTimer);
-    gesture.longPressTimer = null;
-    gesture.mode = "drawing";
-  }
-
-  private startErasing(gesture: Gesture) {
-    if (gesture.longPressTimer !== null) window.clearTimeout(gesture.longPressTimer);
-    gesture.longPressTimer = null;
-    gesture.mode = "erasing";
-  }
-
   private queueLiveDraw() {
     if (this.liveFrame !== null) return;
     this.liveFrame = requestAnimationFrame(() => {
@@ -477,8 +441,7 @@ export class PageDrawingSurface {
 
   private drawLive() {
     const gesture = this.gesture;
-    if (!gesture?.stroke || !this.activeSession() ||
-      (gesture.mode !== "drawing" && gesture.mode !== "pending")) return;
+    if (!gesture?.stroke || !this.activeSession() || gesture.mode !== "drawing") return;
     const context = this.live.getContext("2d");
     if (!context) return;
     const started = performance.now();
@@ -542,11 +505,10 @@ export class PageDrawingSurface {
     if (!gesture) return;
     // Clear first: releasing capture can itself dispatch lostpointercapture.
     this.gesture = null;
-    if (gesture.longPressTimer !== null) window.clearTimeout(gesture.longPressTimer);
     if (this.live.hasPointerCapture(gesture.pointerId)) this.live.releasePointerCapture(gesture.pointerId);
 
     if (commit && session) {
-      if ((gesture.mode === "drawing" || gesture.mode === "pending") && gesture.stroke) {
+      if (gesture.mode === "drawing" && gesture.stroke) {
         session.commit([...session.getSnapshot().strokes, gesture.stroke]);
       } else if (gesture.mode === "erasing" && gesture.erasedIds.size > 0) {
         const original = gesture.originalStrokes ?? session.getSnapshot().strokes;
@@ -595,12 +557,9 @@ export class PageDrawingSurface {
     const gesture: Gesture = {
       pointerId: event.pointerId,
       pointerType: event.pointerType,
-      mode: immediatePan ? "panning" : event.pointerType === "pen" ? "pending" : shouldErase ? "erasing" : "drawing",
-      startClientX: event.clientX,
-      startClientY: event.clientY,
+      mode: immediatePan ? "panning" : shouldErase ? "erasing" : "drawing",
       lastClientX: event.clientX,
       lastClientY: event.clientY,
-      longPressTimer: null,
       stroke: shouldErase || immediatePan ? null : this.createStroke(event, session),
       renderedPointCount: 0,
       originalStrokes: shouldErase ? snapshot.strokes : null,
@@ -613,11 +572,6 @@ export class PageDrawingSurface {
 
     if (immediatePan) {
       this.updatePanningClass();
-    } else if (event.pointerType === "pen") {
-      if (gesture.stroke) this.queueLiveDraw();
-      gesture.longPressTimer = window.setTimeout(() => {
-        if (this.gesture === gesture && gesture.mode === "pending") this.enterPan(event, gesture, session);
-      }, LONG_PRESS_MS);
     } else if (shouldErase) {
       this.eraseSamples([event], gesture, session);
     } else {
@@ -640,38 +594,12 @@ export class PageDrawingSurface {
     const session = this.activeSession();
     if (!gesture || !session || gesture.pointerId !== event.pointerId) return;
     if (event.cancelable) event.preventDefault();
-    const movedToDrawing = shouldStartDrawing(
-      gesture.startClientX,
-      gesture.startClientY,
-      event.clientX,
-      event.clientY,
-    );
-    const wasPending = gesture.mode === "pending";
-    if (wasPending && gesture.stroke) {
-      appendStrokeSamples(gesture.stroke, eventSamples(event), gesture.coordinateElement);
-    }
-    if (gesture.mode === "pending" && movedToDrawing) {
-      if (session.getSnapshot().tool === "eraser") {
-        gesture.stroke = null;
-        gesture.originalStrokes = session.getSnapshot().strokes;
-        this.startErasing(gesture);
-      } else {
-        this.startDrawing(gesture);
-      }
-    }
-
     if (gesture.mode === "panning") {
       const deltaX = event.clientX - gesture.lastClientX;
       const deltaY = event.clientY - gesture.lastClientY;
       scrollByAxis(gesture.scrollTargets?.horizontal ?? null, "x", -deltaX);
       scrollByAxis(gesture.scrollTargets?.vertical ?? null, "y", -deltaY);
     } else if (gesture.mode === "drawing" && gesture.stroke) {
-      if (wasPending) {
-        this.queueLiveDraw();
-        gesture.lastClientX = event.clientX;
-        gesture.lastClientY = event.clientY;
-        return;
-      }
       appendStrokeSamples(gesture.stroke, eventSamples(event), gesture.coordinateElement);
       this.queueLiveDraw();
     } else if (gesture.mode === "erasing") {
@@ -689,9 +617,6 @@ export class PageDrawingSurface {
     if (this.gesture?.pointerId !== event.pointerId) return;
     if (event.cancelable) event.preventDefault();
     const session = this.activeSession();
-    if (session && this.gesture.mode === "pending" && !this.gesture.stroke) {
-      this.startErasing(this.gesture);
-    }
     if (session && this.gesture.mode === "erasing") this.eraseSamples([event], this.gesture, session);
     else if (this.gesture.stroke && this.gesture.mode !== "panning") {
       // Short/fast contacts may deliver the endpoint only in pointerup.
@@ -797,10 +722,7 @@ export class PageDrawingSurface {
   };
 }
 
-export const drawingGestureConstants = { LONG_PRESS_MS, MOVE_TOLERANCE };
 export const drawingSurfaceTestHelpers = {
   movement,
-  shouldStartDrawing,
-  classifyPendingGesture,
   normalizeWheelDelta,
 };
